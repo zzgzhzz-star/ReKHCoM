@@ -29,9 +29,15 @@ def main(tools, unsigned, target):
     subprocess.run([tools / "aapt", "dump", "badging", target], check=True, stdout=subprocess.DEVNULL)
     with ZipFile(target) as apk:
         check_members(apk)
-        if apk.testzip() or not any(b"7ebd009e0a3394ae2ad66e7fab77170053e90056" in apk.read(name)
-                                    for name in apk.namelist() if name.endswith(".dex")):
+        dex = [apk.read(name) for name in apk.namelist() if name.endswith(".dex")]
+        if apk.testzip() or not any(b"7ebd009e0a3394ae2ad66e7fab77170053e90056" in item for item in dex):
             raise ValueError("Signed APK is corrupt or the Chinese ROM importer is missing")
+        if not any("ReKHCoM · 安全启动".encode() in item for item in dex):
+            raise ValueError("Chinese safe-startup screen is missing from the APK")
+        font = apk.read("assets/fonts/ReKHCoM-Zh.ttf")
+        for abi in ("armeabi-v7a", "arm64-v8a"):
+            if not font or font not in apk.read(f"lib/{abi}/liblauncher.so"):
+                raise ValueError(f"Bundled Chinese font is missing from the {abi} launcher")
 
 
 if __name__ == "__main__":

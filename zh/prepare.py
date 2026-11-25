@@ -31,8 +31,6 @@ def main(root):
         env.write(f"SDL_VERSION={sdl_version[1]}\n")
     for directory in ("font", "deps", "dist"):
         Path(directory).mkdir(exist_ok=True)
-    characters = set("简体中文" + "".join(translations[k] for k in active & translations.keys()))
-    Path("font/characters.txt").write_text("".join(sorted(characters)), encoding="utf-8")
 
 
 if __name__ == "__main__":
