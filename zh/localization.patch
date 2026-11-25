@@ -1,0 +1,1171 @@
+diff --git a/port/android/app/src/main/java/com/rekhcom/android/LauncherActivity.java b/port/android/app/src/main/java/com/rekhcom/android/LauncherActivity.java
+index 3f14b8be792ccb27aad138fe93d672fc19a3b63b..afb49b8bec96ad91d1be29fdeb77aad606ea22e4 100644
+--- a/port/android/app/src/main/java/com/rekhcom/android/LauncherActivity.java
++++ b/port/android/app/src/main/java/com/rekhcom/android/LauncherActivity.java
+@@ -53,19 +53,18 @@ public class LauncherActivity extends StartupSdlActivity {
+     /** Called by the launcher: the game for region (eu/us/jp) with the dump at rom; kh_com.ini and netlink.cfg are written. */
+     public void nativeLaunch(final String region,final String rom){
+         if(StartupGameAttempt.valid(getIntent().getStringExtra("startup_attempt"))){
+-            runOnUiThread(()->safeLaunchGame(region));return;
++            runOnUiThread(()->safeLaunchGame(region,rom));return;
+         }
+         runOnUiThread(()->{Intent i=new Intent(this,GameActivity.class);i.putExtra("region",region);i.putExtra("rom",rom);startActivity(i);});
+     }
+-    private void safeLaunchGame(final String region){
++    private void safeLaunchGame(final String region,final String rom){
+             // Admission is on the UI thread even when JNI calls from SDLThread.
+             if(busy)return;busy=true;progress(t("Preparando inicio seguro…","Preparing safe start…"));
+             new Thread(()->{
+                 try{
+                     String selected="us".equals(region)?"us":"jp".equals(region)?"jp":"eu";
+                     String code="us".equals(selected)?"B8CE":"jp".equals(selected)?"B8CJ":"B8CP";
+-                    File installed=new File(getFilesDir(),"roms/"+code+".gba");
+-                    if(!code.equals(RomImport.verifyInstalled(installed)))throw new IOException("ROM region mismatch");
++                    File installed=RomImport.resolveInstalled(getFilesDir(),code,rom);
+                     if(!StartupProcessGate.awaitAbsent(getApplicationContext(),"game"))throw new IOException("Previous game process is still closing");
+                     String attempt=java.util.UUID.randomUUID().toString().replace("-","");
+                     StartupStageJournal.record(getFilesDir(),"launcher",attempt,android.os.Process.myPid(),"game_requested",0);
+diff --git a/port/android/app/src/main/java/com/rekhcom/android/RomImport.java b/port/android/app/src/main/java/com/rekhcom/android/RomImport.java
+index 0c479c1ee4dd848c59ace6f78008d9aedeb957b0..6c3c572906f7d8fefcc62426050dfa9f80b27c83 100644
+--- a/port/android/app/src/main/java/com/rekhcom/android/RomImport.java
++++ b/port/android/app/src/main/java/com/rekhcom/android/RomImport.java
+@@ -20,6 +20,8 @@ public final class RomImport {
+     private static final String[] CODES={"B8CP","B8CE","B8CJ"};
+     private static final String[] HASHES={"8db73586cdb11b3795907edebf43228dbcd3e6b2",
+         "10729bd884f8fdca7a310b6d606c52e46657aa48","59ec0a0a4ccd1e6acb3bbd7bfb21d63988958cfa"};
++    private static final String CHINESE_JP_HASH="7ebd009e0a3394ae2ad66e7fab77170053e90056";
++    private static final String CHINESE_JP_FILE="B8CJ-zh.gba";
+     public enum Kind {ROM,HD_PACK}
+     public static final class Result {
+         public final Kind kind;
+@@ -48,12 +50,19 @@ public final class RomImport {
+     }
+     private static int region(Copied data)throws IOException{
+         if(data.size!=ROM_SIZE)throw new IOException("A clean 32 MiB GBA dump is required");
++        if(CHINESE_JP_HASH.equals(data.hash))return 2;
+         for(int i=0;i<HASHES.length;i++)if(HASHES[i].equals(data.hash))return i;
+-        throw new IOException("ROM not recognized; use a supported clean EU, US or JP dump");
++        throw new IOException("ROM not recognized; use a supported original or Chinese-patched dump");
++    }
++    private static String filename(Copied data,int version){
++        return CHINESE_JP_HASH.equals(data.hash)?CHINESE_JP_FILE:CODES[version]+".gba";
+     }
+     /** Read-only validation of a previous installation; never asks the user to
+      * reimport a valid existing dump and never writes ROM/save/config data. */
+     public static String verifyInstalled(File file)throws Exception{
++        return CODES[region(readInstalled(file))];
++    }
++    private static Copied readInstalled(File file)throws Exception{
+         if(!file.isFile()||file.length()!=ROM_SIZE)throw new IOException("A clean 32 MiB GBA dump is required");
+         MessageDigest digest=MessageDigest.getInstance("SHA-1");Copied data=new Copied();byte[] block=new byte[65536];
+         try(InputStream in=new FileInputStream(file)){
+@@ -63,7 +72,38 @@ public final class RomImport {
+             }
+         }
+         StringBuilder hex=new StringBuilder();for(byte value:digest.digest())hex.append(String.format(Locale.ROOT,"%02x",value&255));
+-        data.hash=hex.toString();return CODES[region(data)];
++        data.hash=hex.toString();return data;
++    }
++    private static File verifySlot(File rom,String code)throws Exception{
++        Copied data=readInstalled(rom);
++        int version=region(data);
++        if(!code.equals(CODES[version])||!rom.getName().equals(filename(data,version)))
++            throw new IOException("ROM region or variant mismatch");
++        return rom;
++    }
++    public static File resolveInstalled(File files,String code,String requested)throws Exception{
++        File dir=new File(files,"roms");
++        File original=new File(dir,code+".gba");
++        if(!"B8CJ".equals(code)){
++            if(requested!=null&&!original.getAbsolutePath().equals(requested))throw new IOException("Invalid ROM path");
++            return verifySlot(original,code);
++        }
++        File chinese=new File(dir,CHINESE_JP_FILE);
++        if(requested!=null){
++            if(chinese.getAbsolutePath().equals(requested))return verifySlot(chinese,code);
++            if(original.getAbsolutePath().equals(requested))return verifySlot(original,code);
++            throw new IOException("Invalid ROM path");
++        }
++        boolean preferChinese=true;
++        File config=new File(files,"decompui.ini");
++        if(config.isFile()){
++            try(BufferedReader reader=new BufferedReader(new FileReader(config))){
++                for(String line;(line=reader.readLine())!=null;)
++                    if(line.equals("prefer_chinese_rom=0"))preferChinese=false;
++            }
++        }
++        try{return verifySlot(preferChinese?chinese:original,code);}
++        catch(IOException unavailable){return verifySlot(preferChinese?original:chinese,code);}
+     }
+     private static void safeName(String name)throws IOException{
+         if(name.length()>1024||name.startsWith("/")||name.indexOf('\\')>=0||name.indexOf(':')>=0||name.indexOf('\0')>=0)
+@@ -124,7 +164,7 @@ public final class RomImport {
+                         try(InputStream in=zip.getInputStream(candidate)){copied=copy(in,romPart,ROM_SIZE,true);}
+                         if(copied.size!=candidate.getSize()||copied.crc!=candidate.getCrc())throw new IOException("ZIP ROM size or CRC mismatch");
+                         int version=region(copied);result=new Result(Kind.ROM,CODES[version]);
+-                        pending=romPart;target=new File(dir,result.code+".gba");
++                        pending=romPart;target=new File(dir,filename(copied,version));
+                     }else{
+                         if(!hd)throw new IOException("ZIP contains no supported ROM or HD content");
+                         result=new Result(Kind.HD_PACK,"");pending=staged;target=new File(files,"ReKHCoM-HD.zip");
+@@ -133,7 +173,7 @@ public final class RomImport {
+             }else{
+                 int version=region(copied);File dir=new File(files,"roms");
+                 if(!dir.isDirectory()&&!dir.mkdirs())throw new IOException("No ROM directory");
+-                result=new Result(Kind.ROM,CODES[version]);pending=staged;target=new File(dir,result.code+".gba");
++                result=new Result(Kind.ROM,CODES[version]);pending=staged;target=new File(dir,filename(copied,version));
+             }
+             replace.replace(pending,target);
+             return result;
+diff --git a/port/android/diagnostics/StartupDiagnosticActivity.java b/port/android/diagnostics/StartupDiagnosticActivity.java
+index 90a3656383fce5ccc20c8d1d6bf0486687e30ffd..6c9ea6f0e1e9bcc1bc7d16bd80cedde2958c47a7 100644
+--- a/port/android/diagnostics/StartupDiagnosticActivity.java
++++ b/port/android/diagnostics/StartupDiagnosticActivity.java
+@@ -48,8 +48,8 @@ public final class StartupDiagnosticActivity extends Activity {
+         final Context context=getApplicationContext();
+         new Thread(()->{
+             try {
+-                File rom=new File(context.getFilesDir(),"roms/"+CODES[selected]+".gba");
+-                if(!graphical&&!CODES[selected].equals(RomImport.verifyInstalled(rom)))throw new java.io.IOException("Installed ROM region mismatch");
++                File rom=graphical?new File(context.getFilesDir(),"roms/"+CODES[selected]+".gba"):
++                    RomImport.resolveInstalled(context.getFilesDir(),CODES[selected],null);
+                 String role=graphical?"launcher":"game";
+                 if(!StartupProcessGate.awaitAbsent(context,role))throw new java.io.IOException(t("La ventana anterior todavía está cerrándose. Intenta de nuevo o comparte el informe.","The previous window is still closing. Try again or share the report."));
+                 StartupStageJournal.record(context.getFilesDir(),"safe",attempt,android.os.Process.myPid(),graphical?"launcher_requested":"game_requested",selected);
+diff --git a/port/configure_pc.py b/port/configure_pc.py
+index 4ea8db4b1340b39c11b6819e5d375b041a4834cc..1ca74b51d38a2bbe3fee87a9a7599cb6b72ea5b3 100644
+--- a/port/configure_pc.py
++++ b/port/configure_pc.py
+@@ -47,11 +47,14 @@ def main():
+     parser.add_argument("--debug", action="store_true", help="no optimisation, console window")
+     parser.add_argument("--version", default="eu", choices=VERSIONS, help="cartridge version (default: eu)")
+     parser.add_argument("--out", help="output directory (default: build/pc, or build/pc-<version>)")
++    parser.add_argument("--launcher-only", action="store_true", help="build ReKHCoM.exe without ROM-generated game code")
+     parser.add_argument("--reloc", action="store_true",
+                         help="relocatable GBA space (PORT_GBA_RELOC, as on Vita/Switch), checked on Windows (build/pc-reloc-<version>)")
+     parser.add_argument("--hd2d", action="store_true",
+                         help="alternative build with the experimental HD-2D look on by default (build/pc-hd2d)")
+     args = parser.parse_args()
++    if args.launcher_only and args.version != "eu":
++        parser.error("--launcher-only uses the default --version=eu")
+ 
+     global BUILD, VERSION, GEN, PC_GEN
+     VERSION = args.version
+@@ -70,8 +73,9 @@ def main():
+ 
+     # Asset glue (headers, text fragments, ROM symbol table).
+     env = dict(os.environ, PYTHONUTF8="1")
+-    subprocess.check_call([sys.executable, str(ROOT / "port" / "tools" / "gen_pc_assets.py"),
+-                           "--version", VERSION, "--ensure"], env=env)
++    if not args.launcher_only:
++        subprocess.check_call([sys.executable, str(ROOT / "port" / "tools" / "gen_pc_assets.py"),
++                               "--version", VERSION, "--ensure"], env=env)
+ 
+     include_dirs = ["include"] + sorted(rel(p) for p in (ROOT / "include").iterdir()
+                                         if p.is_dir() and p.name != "gba")
+@@ -152,6 +156,14 @@ def main():
+             obj = "$builddir/ra/" + rel(src).replace("/", "_")[:-2] + ".o"
+             n.build(obj, "cc_port", rel(src))
+             ra_objs.append(obj)
++        # The icon and font resources are shared by the game and the launcher.
++        n.build("$builddir/port/rekhcom_rc.o", "rc", "port/decompui/rekhcom.rc",
++                implicit=["port/decompui/assets/rekhcom.ico", "port/include/port/port_font_resources.h",
++                          "port/assets/fonts/KHMenu.otf", "port/assets/fonts/ComicHearts.otf"])
++        if args.launcher_only:
++            n.default(decompui(n, toolchain, sdl_arch, args.debug, ra_objs))
++            print(f"configured {rel(BUILD / 'build.ninja')} (launcher only)")
++            return
+         objs += ra_objs
+         for src in sorted((ROOT / "src").rglob("*.c")):
+             obj = f"$builddir/game/{rel(src)[4:-2]}.o"
+@@ -168,10 +180,6 @@ def main():
+             obj = f"$builddir/port/{src.stem}_s.o"
+             n.build(obj, "as", rel(src))
+             objs.append(obj)
+-        # the icon (port/decompui/assets/rekhcom.ico), for the game and the launcher
+-        n.build("$builddir/port/rekhcom_rc.o", "rc", "port/decompui/rekhcom.rc",
+-                implicit=["port/decompui/assets/rekhcom.ico", "port/include/port/port_font_resources.h",
+-                          "port/assets/fonts/KHMenu.otf", "port/assets/fonts/ComicHearts.otf"])
+         objs.append("$builddir/port/rekhcom_rc.o")
+         objs.append("$builddir/port/core_assets_rc.o")
+         n.newline()
+diff --git a/port/decompui/decompui.cpp b/port/decompui/decompui.cpp
+index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353fc4424f39 100644
+--- a/port/decompui/decompui.cpp
++++ b/port/decompui/decompui.cpp
+@@ -122,7 +122,7 @@ static bool sSpanish;
+ /* The launcher in the game's languages (the user, 24/10): Spanish and English in the code, French, German, Italian
+    and Japanese from i18n_table.inc, keyed by the English text; a text not translated yet stays in English. */
+ #include "i18n_table.inc"
+-static int sUiColumn; /* kI18n's column: 0 English (and Spanish), 1 fr, 2 de, 3 it, 4 ja */
++static int sUiColumn; /* 0 en/es, 1 fr, 2 de, 3 it, 4 ja, 5 zh */
+ static std::unordered_map<std::string, const char*> sUiTable;   /* English text -> this language's */
+ static std::unordered_map<const char*, const char*> sUiSeen;    /* the same by address, once looked up */
+ 
+@@ -146,19 +146,28 @@ struct Version {
+     const char* id;
+     const char* code;
+     const char* sha1;
+-    const char* regionEs;
+     const char* regionEn;
+     const char* languages; /* flag:code pairs, e.g. "gb:EN fr:FR" */
+ };
+ 
+ static const Version kVersions[] = {
+-    { "eu", "B8CP", "8db73586cdb11b3795907edebf43228dbcd3e6b2", "Europa", "Europe", "gb:EN fr:FR de:DE es:ES it:IT" },
+-    { "us", "B8CE", "10729bd884f8fdca7a310b6d606c52e46657aa48", "América", "USA", "us:EN" },
+-    { "jp", "B8CJ", "59ec0a0a4ccd1e6acb3bbd7bfb21d63988958cfa", "Japón", "Japan", "jp:JA" },
++    { "eu", "B8CP", "8db73586cdb11b3795907edebf43228dbcd3e6b2", "Europe", "gb:EN fr:FR de:DE es:ES it:IT" },
++    { "us", "B8CE", "10729bd884f8fdca7a310b6d606c52e46657aa48", "USA", "us:EN" },
++    { "jp", "B8CJ", "59ec0a0a4ccd1e6acb3bbd7bfb21d63988958cfa", "Japan", "jp:JA" },
+ };
+ static const int kVersionCount = 3;
++static constexpr int kJapaneseVersion = 2;
++static constexpr const char* kChineseRomSha1 = "7ebd009e0a3394ae2ad66e7fab77170053e90056";
+ static const size_t kRomSize = 32u << 20;
+ 
++static const char* RegionName(int version) {
++    if (version == 0)
++        return T("Europa", "Europe");
++    if (version == 1)
++        return T("América", "USA");
++    return T("Japón", "Japan");
++}
++
+ struct VersionState {
+     bool installed;
+     fs::path exe;
+@@ -166,6 +175,9 @@ struct VersionState {
+ 
+ static fs::path sRoot;
+ static VersionState sState[kVersionCount];
++static bool sOriginalJapaneseInstalled;
++static bool sChineseRomInstalled;
++static bool sPreferChineseRom = true;
+ static int sSelected;
+ static void KeepSelection(); /* the version chosen: European first, then the last chosen */
+ static std::string sNotice;
+@@ -262,8 +274,27 @@ static bool ReadFile(const fs::path& path, std::vector<unsigned char>& out, size
+     return (bool)f;
+ }
+ 
+-static fs::path RomPath(int v) {
+-    return sRoot / "roms" / (std::string(kVersions[v].code) + ".gba");
++static fs::path RomPath(int v, bool chinese = false) {
++    return sRoot / "roms" / (chinese ? "B8CJ-zh.gba" : std::string(kVersions[v].code) + ".gba");
++}
++
++static bool UsesChineseRom(int v) {
++    return v == kJapaneseVersion && sChineseRomInstalled && (sPreferChineseRom || !sOriginalJapaneseInstalled);
++}
++
++static fs::path ActiveRomPath(int v) {
++    return RomPath(v, UsesChineseRom(v));
++}
++
++static bool MatchesRom(const std::vector<unsigned char>& rom, int version, bool chinese) {
++    return rom.size() == kRomSize &&
++           std::memcmp(rom.data() + 0xAC, kVersions[version].code, 4) == 0 &&
++           Sha1Hex(rom) == (chinese ? kChineseRomSha1 : kVersions[version].sha1);
++}
++
++static bool VerifiedRomInstalled(int version, bool chinese = false) {
++    std::vector<unsigned char> rom;
++    return ReadFile(RomPath(version, chinese), rom) && MatchesRom(rom, version, chinese);
+ }
+ 
+ /* The player's own files in an install: saves (every bank and version), settings, the RetroAchievements login and the
+@@ -346,8 +377,7 @@ static void ScanInstall() {
+     static const char* const devDirs[] = { "pc", "pc-us", "pc-jp" };
+ 
+     for (int v = 0; v < kVersionCount; v++) {
+-        std::vector<unsigned char> rom;
+-        sState[v].installed = ReadFile(RomPath(v), rom) && Sha1Hex(rom) == kVersions[v].sha1;
++        sState[v].installed = VerifiedRomInstalled(v);
+         /* the game executables live in bin/, so the launcher is the only one at the root */
+         sState[v].exe = sRoot / "bin" / (std::string("khcom_") + kVersions[v].id + ".exe");
+         if (!fs::exists(sState[v].exe))
+@@ -359,6 +389,9 @@ static void ScanInstall() {
+                 sState[v].exe = dev;
+         }
+     }
++    sOriginalJapaneseInstalled = sState[kJapaneseVersion].installed;
++    sChineseRomInstalled = VerifiedRomInstalled(kJapaneseVersion, true);
++    sState[kJapaneseVersion].installed |= sChineseRomInstalled;
+ }
+ 
+ /* The game for version v can start: its dump, and its program (the Android app carries the game in its libraries) */
+@@ -382,8 +415,10 @@ static void InstallRom(const fs::path& path) {
+     for (int v = 0; v < kVersionCount; v++) {
+         if (std::memcmp(rom.data() + 0xAC, kVersions[v].code, 4) != 0)
+             continue;
+-        if (Sha1Hex(rom) != kVersions[v].sha1) {
+-            Notice(std::string(T("La ROM ", "The ")) + T(kVersions[v].regionEs, kVersions[v].regionEn) +
++        const std::string hash = Sha1Hex(rom);
++        const bool chinese = v == kJapaneseVersion && hash == kChineseRomSha1;
++        if (!chinese && hash != kVersions[v].sha1) {
++            Notice(std::string(T("La ROM ", "The ")) + RegionName(v) +
+                        T(" no coincide con el volcado original (SHA-1 distinto).",
+                          " ROM does not match the original dump (different SHA-1)."),
+                    true);
+@@ -391,7 +426,8 @@ static void InstallRom(const fs::path& path) {
+         }
+         std::error_code ec;
+         fs::create_directories(sRoot / "roms", ec);
+-        fs::path tmp = RomPath(v);
++        const fs::path target = RomPath(v, chinese);
++        fs::path tmp = target;
+         tmp += ".tmp";
+         {
+             std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+@@ -401,15 +437,15 @@ static void InstallRom(const fs::path& path) {
+                 return;
+             }
+         }
+-        fs::rename(tmp, RomPath(v), ec);
++        fs::rename(tmp, target, ec);
+         if (ec) {
+             Notice(T("No se pudo instalar la ROM.", "Could not install the ROM."), true);
+             return;
+         }
+-        sState[v].installed = true;
++        ScanInstall();
+         KeepSelection();
+         Notice(std::string(T("ROM instalada y verificada: ", "ROM installed and verified: ")) +
+-                   T(kVersions[v].regionEs, kVersions[v].regionEn),
++                   (chinese ? T("ROM japonesa traducida al chino", "Chinese-patched Japanese ROM") : RegionName(v)),
+                false);
+         return;
+     }
+@@ -640,11 +676,11 @@ static void SaveIni() {
+ static const char* const kGameLanguageIds[] = { "", "en", "fr", "de", "it", "es" };
+ /* The launcher's languages: 1 Spanish, 2 English, then the European cartridge's other three and Japanese; 0 until
+    chosen. ids[] as kh_com's and the flags' (LanguageFlag). */
+-enum { UI_LANGUAGE_COUNT = 6 };
+-static const char* const kUiLanguageIds[UI_LANGUAGE_COUNT + 1] = { "", "es", "en", "fr", "de", "it", "ja" };
++enum { UI_LANGUAGE_ZH = 7, UI_LANGUAGE_COUNT = UI_LANGUAGE_ZH };
++static const char* const kUiLanguageIds[UI_LANGUAGE_COUNT + 1] = { "", "es", "en", "fr", "de", "it", "ja", "zh" };
+ static const char* const kUiLanguageNames[UI_LANGUAGE_COUNT + 1] = {
+-    "", "Espa\xC3\xB1ol", "English", "Fran\xC3\xA7" "ais", "Deutsch", "Italiano", "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E" };
+-static const char* const kUiLanguageFlags[UI_LANGUAGE_COUNT + 1] = { "", "es", "gb", "fr", "de", "it", "jp" };
++    "", "Espa\xC3\xB1ol", "English", "Fran\xC3\xA7" "ais", "Deutsch", "Italiano", "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E", "简体中文" };
++static const char* const kUiLanguageFlags[UI_LANGUAGE_COUNT + 1] = { "", "es", "gb", "fr", "de", "it", "jp", nullptr };
+ static int sUiLanguage;
+ 
+ static void ApplyUiLanguage() {
+@@ -658,6 +694,7 @@ static void ApplyUiLanguage() {
+             case LANG_GERMAN: system = "de"; break;
+             case LANG_ITALIAN: system = "it"; break;
+             case LANG_JAPANESE: system = "ja"; break;
++            case LANG_CHINESE: system = "zh"; break;
+         }
+ #else
+         int count = 0;
+@@ -700,6 +737,8 @@ static void LoadLauncherState() {
+             s64FailedVersion = line.substr(14);
+         } else if (line == "hd_offer=0") {
+             sHdOfferDeclined = true;
++        } else if (line == "prefer_chinese_rom=0") {
++            sPreferChineseRom = false;
+         } else if (line.rfind("version=", 0) == 0) {
+             for (int v = 0; v < kVersionCount; v++)
+                 if (line.substr(8) == kVersions[v].id)
+@@ -734,12 +773,14 @@ static void SaveLauncherState() {
+     f << "runtime_mode=" << sRuntimeMode << "\n";
+     f << "version=" << kVersions[sSelected].id << "\n";
+     f << "ui_language=" << sUiLanguage << "\n";
++    f << "prefer_chinese_rom=" << sPreferChineseRom << "\n";
+     if (sHdOfferDeclined) f << "hd_offer=0\n";
+     if (!s64FailedVersion.empty()) f << "auto64_failed=" << s64FailedVersion << "\n";
+ #else
+     RekhcomRuntime::Save(sRoot / "decompui.ini", {
+         {"runtime_mode", std::to_string(sRuntimeMode)}, {"runtime_auto_version", sRuntimeAutoVersion},
+         {"version", kVersions[sSelected].id}, {"ui_language", std::to_string(sUiLanguage)},
++        {"prefer_chinese_rom", sPreferChineseRom ? "1" : "0"},
+         {"hd_offer", sHdOfferDeclined ? "0" : ""}, {"auto64_failed", s64FailedVersion},
+         {"force_32", ""}, {"game_language", ""}});
+ #endif
+@@ -1093,12 +1134,48 @@ static void LoadFonts() {
+     if (sFontBody == nullptr) {
+         ImFontConfig def;
+         def.SizePixels = Px(16);
+-        sFontBody = sFontSmall = sFontTitle = io.Fonts->AddFontDefault(&def);
++        sFontBody = io.Fonts->AddFontDefault(&def);
++        sFontSmall = sFontTitle = sFontBody;
+     }
+     if (sFontMenu == nullptr)
+         sFontMenu = sFontBody;
+     if (sFontMenuSmall == nullptr)
+         sFontMenuSmall = sFontSmall;
++
++    // The package ships a font subset containing the launcher's Chinese glyphs.
++#ifdef LAUNCHER_ANDROID
++    const std::string zhPath = "fonts/ReKHCoM-Zh.ttf";
++#else
++    const std::string zhPath = (sRoot / "assets/fonts/ReKHCoM-Zh.ttf").u8string();
++#endif
++    size_t zhSize = 0;
++    void* zhBytes = SDL_LoadFile(zhPath.c_str(), &zhSize);
++    static ImVector<ImWchar> zhRanges;
++    if (zhRanges.empty()) {
++        ImFontGlyphRangesBuilder builder;
++        builder.AddText(kUiLanguageNames[UI_LANGUAGE_ZH]);
++        for (const auto& row : kI18n)
++            if (row[5])
++                builder.AddText(row[5]);
++        builder.BuildRanges(&zhRanges);
++    }
++    ImFont* const roles[] = {sFontBody, sFontSmall, sFontTitle, sFontMenu, sFontMenuSmall};
++    for (int i = 0; i < IM_ARRAYSIZE(roles); ++i) {
++        ImFont* const font = roles[i];
++        if (!font || !font->Sources || std::find(roles, roles + i, font) != roles + i)
++            continue;
++        ImFontConfig merge = cfg;
++        merge.MergeMode = true;
++        merge.DstFont = font;
++        merge.OversampleH = 1;
++        const float size = font->Sources->SizePixels;
++        if (zhBytes && zhSize <= 0x7fffffff) {
++            void* ownedBytes = IM_ALLOC(zhSize);
++            std::memcpy(ownedBytes, zhBytes, zhSize);
++            io.Fonts->AddFontFromMemoryTTF(ownedBytes, static_cast<int>(zhSize), size, &merge, zhRanges.Data);
++        }
++    }
++    SDL_free(zhBytes);
+ }
+ 
+ /* AddFont returns an unbuilt object: a later merge can make Build fail while
+@@ -1509,7 +1586,7 @@ static bool HeaderChip(const char* id, const char* label, const char* flag, ImVe
+     return clicked;
+ }
+ 
+-/* The launcher's language: the chosen one in the header, its flag and a ▼; a click lists all six as the same chips */
++/* A click on the active launcher language opens the language picker. */
+ static void LauncherLanguagePicker(ImVec2 size) {
+     if (HeaderChip("##uilang", kUiLanguageNames[sUiLanguage], kUiLanguageFlags[sUiLanguage], size, true) ||
+         (sPage == PAGE_HOME && SDL_getenv("DECOMPUI_LANG_LIST"))) /* harness: the list open on Home's shot */
+@@ -1639,7 +1716,7 @@ static void PageHome(SDL_Window* window) {
+         /* region, code and languages */
+         float tx = rowMin.x + Px(44);
+         dl->AddText(sFontMenu, sFontMenu->FontSize, ImVec2(tx, rowMin.y + Px(4)), ImGui::GetColorU32(kText),
+-                    T(ver.regionEs, ver.regionEn));
++                    UsesChineseRom(v) ? T("ROM japonesa traducida al chino", "Chinese-patched Japanese ROM") : RegionName(v));
+         {
+             /* the code, then each language with its flag */
+             float fs = sFontSmall->FontSize, y = rowMin.y + Px(28), x = tx;
+@@ -1680,6 +1757,14 @@ static void PageHome(SDL_Window* window) {
+         dl->AddText(sFontSmall, sFontSmall->FontSize, sp, ImGui::GetColorU32(color), status);
+         ImGui::PopID();
+     }
++    if (sSelected == kJapaneseVersion && sOriginalJapaneseInstalled && sChineseRomInstalled) {
++        const char* label = sPreferChineseRom ? T("Usar ROM japonesa original", "Use original Japanese ROM")
++                                              : T("Usar ROM traducida al chino", "Use Chinese-patched ROM");
++        if (ImGui::Button(label)) {
++            sPreferChineseRom = !sPreferChineseRom;
++            SaveLauncherState();
++        }
++    }
+     if (sSelected == 0) {
+         /* the European cartridge's language: chosen here, the game starts in it
+            and skips its language screen (game_language, shared with kh_com.ini) */
+@@ -1718,9 +1803,9 @@ static void PageHome(SDL_Window* window) {
+             if (HomeFeatureRow(T("Undub (voces japonesas)", "Undub (Japanese voices)"),
+                                T("Las voces japonesas originales con los textos de tu versión. Necesita la ROM japonesa.",
+                                  "The original Japanese voices with your version's text. Needs the Japanese ROM."),
+-                               Ini("undub"), sState[2].installed,
++                               Ini("undub"), sOriginalJapaneseInstalled,
+                                T("Instalar la ROM japonesa \xE2\x86\x92", "Install the Japanese ROM \xE2\x86\x92"), "jp")) {
+-                if (sState[2].installed)
++                if (sOriginalJapaneseInstalled)
+                     SaveIni();
+                 else
+                     PickRom(window);
+@@ -2155,7 +2240,7 @@ static void PageSound() {
+     NextCard("voices", T("VOCES Y HD", "VOICES AND HD"));
+     changed |= GatedToggle(T("Undub (voces japonesas)", "Undub (Japanese voices)"),
+                          T("Requiere la ROM japonesa original verificada en roms/B8CJ.gba. Se aplica al iniciar el juego; conserva los textos europeos o ingleses.",
+-                           "Requires the verified original Japanese ROM in roms/B8CJ.gba. Applied when starting the game; keeps European or English text."), Ini("undub"), sState[2].installed, "jp");
++                           "Requires the verified original Japanese ROM in roms/B8CJ.gba. Applied when starting the game; keeps European or English text."), Ini("undub"), sOriginalJapaneseInstalled, "jp");
+     
+     ImGui::Separator();
+     ImGui::PushStyleColor(ImGuiCol_TextLink, kAccent);
+@@ -2974,7 +3059,7 @@ static void CreateDesktopShortcut() {
+     HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+     IShellLinkW* shell = nullptr;
+     if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&shell))) {
+-        std::wstring args = L"--data-dir " + Quote(sRoot.wstring()) + L" --rom " + Quote(RomPath(sSelected).wstring());
++        std::wstring args = L"--data-dir " + Quote(sRoot.wstring()) + L" --rom " + Quote(ActiveRomPath(sSelected).wstring());
+         IPersistFile* file = nullptr;
+         shell->SetPath(st.exe.wstring().c_str());
+         shell->SetArguments(args.c_str());
+@@ -3297,7 +3382,7 @@ static void AddToSteam() {
+         return;
+     }
+     std::string exe = "\"" + st.exe.u8string() + "\"", dir = "\"" + sRoot.u8string() + "\"";
+-    std::string args = "--data-dir \"" + sRoot.u8string() + "\" --rom \"" + RomPath(sSelected).u8string() + "\"";
++    std::string args = "--data-dir \"" + sRoot.u8string() + "\" --rom \"" + ActiveRomPath(sSelected).u8string() + "\"";
+     std::string name = "ReKHCoM";
+     uint32_t appid = Crc32(exe + name) | 0x80000000u;
+     int done = 0;
+@@ -3402,7 +3487,8 @@ static fs::path PickInstallFolder() {
+     DWORD options = 0;
+     dialog->GetOptions(&options);
+     dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+-    dialog->SetTitle(sUiLanguage == 1 ? L"Carpeta donde instalar ReKHCoM" : L"Folder to install ReKHCoM in");
++    dialog->SetTitle(sUiLanguage == UI_LANGUAGE_ZH ? L"选择 ReKHCoM 安装文件夹" :
++                     sUiLanguage == 1 ? L"Carpeta donde instalar ReKHCoM" : L"Folder to install ReKHCoM in");
+     std::error_code ec;
+     for (wchar_t d = L'D'; d <= L'Z'; d++) {
+         std::wstring games = std::wstring(1, d) + L":\\Games";
+@@ -3581,7 +3667,7 @@ static void Launch(SDL_Window* window) {
+     (void)window;
+     SaveIni();
+     SaveLauncherState();
+-    if (!AndroidLaunch(kVersions[sSelected].id, RomPath(sSelected).u8string()))
++    if (!AndroidLaunch(kVersions[sSelected].id, ActiveRomPath(sSelected).u8string()))
+         Notice(T("No se pudo iniciar el juego.", "Could not start the game."), true);
+     return;
+ #else
+@@ -3623,7 +3709,7 @@ static void Launch(SDL_Window* window) {
+             cmd += L" " + Quote(guest.wstring()) + L" --data " + Quote(sRoot.wstring()) +
+                    L" --boot-status " + Quote(boot.wstring());
+         } else {
+-            cmd += L" --data-dir " + Quote(sRoot.wstring()) + L" --rom " + Quote(RomPath(sSelected).wstring());
++            cmd += L" --data-dir " + Quote(sRoot.wstring()) + L" --rom " + Quote(ActiveRomPath(sSelected).wstring());
+         }
+         STARTUPINFOW si = {};
+         PROCESS_INFORMATION pi = {};
+@@ -3632,7 +3718,7 @@ static void Launch(SDL_Window* window) {
+         const wchar_t* old = _wgetenv(L"KHCOM_ROM");
+         const bool hadRom = old != nullptr;
+         std::wstring oldRom = old ? old : L"";
+-        SetEnvironmentVariableW(L"KHCOM_ROM", RomPath(sSelected).c_str());
++        SetEnvironmentVariableW(L"KHCOM_ROM", ActiveRomPath(sSelected).c_str());
+         BOOL created = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
+                                       sRoot.c_str(), &si, &pi);
+         SetEnvironmentVariableW(L"KHCOM_ROM", hadRom ? oldRom.c_str() : nullptr);
+diff --git a/port/decompui/i18n/zh.json b/port/decompui/i18n/zh.json
+new file mode 100644
+index 0000000000000000000000000000000000000000..f6074c3b0e5e0c7d71ac347c093f493afa08f7db
+--- /dev/null
++++ b/port/decompui/i18n/zh.json
+@@ -0,0 +1,468 @@
++{
++ "": "ROM ",
++ "Europe": "欧洲版",
++ "Japan": "日本版",
++ "USA": "美国版",
++ "Chinese-patched Japanese ROM": "日本版（简体中文 ROM）",
++ "Use original Japanese ROM": "使用日版原版 ROM",
++ "Use Chinese-patched ROM": "使用简体中文 ROM",
++ ". Recoverable progress is preserved.": "。已保留可恢复的进度。",
++ "64-BIT MODE · SOMETHING WENT WRONG": "64 位模式 · 运行异常",
++ "64-bit mode requires a CPU with SSE4.1. You can choose 32 bits under Advanced.": "64 位模式需要支持 SSE4.1 的处理器。你可以在高级设置中选择 32 位模式。",
++ "Close": "关闭",
++ "GBA: cubic interpolation and a gentle low-pass, less of the metallic edge in the 16-bit sound's treble. HD: the interpolation only, crisper beside the HD music.": "GBA 模式使用三次插值和柔和低通滤波，减轻 16 位音频高频的金属感。高清模式仅使用插值，以保留更清晰的音色。",
++ "Games of the Re:CoM version have their own list: the same official achievements plus the mode's own. Worlds, bosses and the story need the whole game on Proud. They are never sent to RetroAchievements.": "重制模式有单独的成就列表，包含原版成就和专属成就。世界、首领和剧情相关成就需全程使用高难度模式。这些成就只在本机记录。",
++ "HD: Re:CoM's cards, logo, music and movies (imported HD mod) and every improvement. GBA enhanced: wide view and improvements without HD extras. GBA classic: the GBA picture at a whole scale with a border, everything off. Choosing a mode sets its values; you can change any of them afterwards.": "高清模式启用所有增强功能，并使用导入的重制版卡片、标志、音乐与影片。GBA 增强模式提供宽屏和一般增强功能。GBA 经典模式使用带边框的整数倍率画面。选择预设后仍可单独调整各项设置。",
++ "Import failed: ": "导入失败：",
++ "Native 240p for CRTs and scalers; super-res (horizontal only) for CRT Emudriver or custom modelines; 480p for displays and devices that need it. No filters or scanlines.": "原生 240p 适用于 CRT 和缩放器。横向超分辨率适用于 CRT Emudriver 或自定义时序。480p 适用于需要该分辨率的设备。全部停用滤镜和扫描线。",
++ "Nintendo pads (Switch Pro, Joy-Con, 8BitDo in Switch mode) have A and B, X and Y the other way round from Xbox pads. ReKHCoM detects them; turn this on if yours is taken for an Xbox pad (e.g. through Steam or Lutris). On: the button labelled A is the game's A, B is B, X is X and Y is Y, in the game and in this launcher. The bindings in the table above stay as they are.": "任天堂布局手柄与 Xbox 手柄的 A/B、X/Y 位置相反。若 Steam、Lutris 等将手柄识别为 Xbox 布局，可开启此项，让游戏和启动器按手柄上的字母响应。上表的绑定保持原样。",
++ "On Automatic, this version will start in 32 bits from now on. To try 64 bits again, choose Force 64-bit under Advanced.": "自动模式今后会以 32 位启动此区版。若要重试 64 位，可在高级设置中选择强制 64 位。",
++ "Play in 32 bits": "以 32 位模式开始游戏",
++ "Report opens GitHub with the version and the end of the log already written (you need a GitHub account) and shows you the file ReKHCoM-reporte.txt, with the full log of this session and the 5 before: drag it into the report and tell us what you were doing.": "报告会在 GitHub 打开预填版本和日志末尾的草稿，并显示包含最近六次会话完整日志的 ReKHCoM-reporte.txt。可将文件拖进报告，并说明当时的操作。",
++ "Report the problem": "报告问题",
++ "Resume or discard the previous import first; its progress is preserved.": "请先继续或放弃上次导入。原导入进度已保留。",
++ "Sora only: hold V, the right-stick button or right stick down for half a second to cancel the stock and return those cards to the hand. Cannot cancel a sleight in progress. Off by default.": "仅限索拉：按住 V 或右摇杆按键，或将右摇杆向下拨半秒，即可取消储备并收回手牌。正在施放的组合技无法取消。默认关闭。",
++ "Sound": "声音",
++ "Source: as it is. Good: half the space, hardly a visible difference. Saving: a quarter of the space, somewhat visible in busy scenes. Applied when importing, or to what is installed with \"Compress what is installed\".": "原始画质保留源文件。高画质约占一半空间，差别很小。节省空间约占四分之一，画面复杂时可能看出差别。设置应用于导入或已安装影片的压缩。",
++ "The ": "该",
++ "The 64-bit game closed with an error (code %s). You can keep playing in 32 bits: your saves and settings are the same.": "64 位游戏异常退出（错误代码 %s）。可以使用相同的存档和设置，切换到 32 位继续游玩。",
++ "The RetroAchievements set (its authors at retroachievements.org). They are earned playing the European version, with or without an account, and kept on this computer. Cheats, rematches and loading a save state pause achievements until the game is restarted.": "欧版游玩时可在本机获得 RetroAchievements 成就，可选登录账号。作弊、重赛和读取即时存档会暂停成就，重启游戏后恢复。",
++ "The link battle (Title > Link battle) over the internet instead of the cable. Steam: both with Steam open; one opens a room and the other joins (a Steam friend's room first). IP: the host opens the UDP port on the router; the other types the host's IP. Relay: both type the same server and room code (Android too).": "在标题界面打开联机对战。Steam：双方运行 Steam，由一方创建房间，另一方加入。直连：主机开放路由器 UDP 端口，另一方输入主机 IP。中继：双方输入相同的服务器和房间代码，安卓也支持。",
++ "Two short movies retain the GBA version until JP timing is verified; full scenes use your JP import.": "在日语版时间轴校验完成前，两部短片仍使用 GBA 版。其余完整过场使用你导入的日语版。",
++ "could not prepare worker": "无法准备后台任务",
++ "could not start worker": "无法启动后台任务",
++ "insufficient memory": "内存不足",
++ "invalid file or operation": "文件或操作无效",
++ "system or worker error": "系统或后台任务出错",
++ "unexpected worker error": "后台任务发生意外错误",
++ "  (demanding)": "（性能要求较高）",
++ "  (integer x": "（整数倍率 ×",
++ " ROM does not match the original dump (different SHA-1).": " ROM 与原版不符（SHA-1 不一致）。",
++ " ROM installed": " ROM 已安装",
++ " at once)": "）",
++ " files imported.": " 个文件已导入。",
++ "%s%d HD mod files": "%s%d 个高清模组文件",
++ "%u / %d · %u / %u points": "%u / %d · %u / %u 分",
++ "%u point · %s": "%u 分 · %s",
++ "%u points · %s": "%u 分 · %s",
++ ", converted from another region": "，已从其他区版转换",
++ "1.5 HD mode": "1.5 高清模式",
++ "32/64-bit mode": "32/64 位运行模式",
++ "; %d leftovers to the Recycle Bin": "，%d 个残留文件已移到回收站",
++ "; a package was kept (it held other files)": "，有一个含其他文件的压缩包已保留",
++ "A \"ReKHCoM\" shortcut that opens the game without the launcher.": "在桌面创建 ReKHCoM 快捷方式，可直接进入游戏。",
++ "A decorative frame around the GBA picture, like the Super Game Boy's.": "为 GBA 画面加上类似 Super Game Boy 的装饰边框。",
++ "A save from an emulator (mGBA, VBA, NO$GBA...) or GameShark / Action Replay. It is converted to this version if it comes from another region; the current one is backed up first.": "导入模拟器（mGBA、VBA、NO$GBA 等）或 GameShark / Action Replay 的存档。导入前会备份当前存档，其他区版的存档会转换为当前区版。",
++ "ACHIEVEMENTS · KINGDOM HEARTS: CHAIN OF MEMORIES": "成就 · 王国之心：记忆之链",
++ "ACHIEVEMENTS · REBEL MODE": "成就 · 叛逆模式",
++ "ALREADY LOADED": "已加载",
++ "Achievements": "成就",
++ "Action": "操作",
++ "Add": "添加",
++ "Add to Steam": "添加到 Steam",
++ "Added to Steam. If Steam is open, restart it to see it in the library.": "已添加到 Steam。若 Steam 正在运行，请重启 Steam 后查看游戏库。",
++ "Adds it to your Steam library as a non-Steam game, with its cover (to play with Steam Input, Big Picture or on a Steam Deck).": "将游戏和封面添加到 Steam 库，可使用 Steam Input、大屏幕模式或 Steam Deck。",
++ "Adjusted": "调整构图",
++ "Adjusted preserves your zoom in honors-approved scenes. Original shot uses close framing in every scene. Extended uses your zoom everywhere; some scenery edges are still in development.": "调整构图会在已适配的场景保留缩放。原版构图始终使用近景。扩展构图始终使用当前缩放，部分场景的边缘仍在制作中。",
++ "Advanced": "高级",
++ "After changing the game's language in Steam and finishing the download, check the available files again.": "在 Steam 切换游戏语言并等待下载完成后，再检查可用文件。",
++ "All": "全部",
++ "Already imported movies: audio language unverified. Changing Steam does not change that copy.": "已导入的影片尚未核实音轨语言。Steam 中的语言设置仅影响之后的下载。",
++ "Applies on the next launch.": "下次启动时生效。",
++ "Ask at start": "启动时询问",
++ "Aspect ratio": "画面比例",
++ "At the save crystal, up/down switches between the character's two files. Saving to the other one makes it the current game. Off by default.": "在存档水晶处按上或下可切换该角色的两个存档。存到另一个位置后，该位置会成为当前存档。默认关闭。",
++ "Audio filter": "音频滤波",
++ "Auto (fill window)": "自动（填满窗口）",
++ "Auto adapts the view to the window.": "根据窗口大小自动调整画面。",
++ "Auto view only. Leaving battle restores the main zoom.": "仅在自动画面模式下生效。离开战斗时恢复常规缩放。",
++ "Auto: legacy import": "自动（旧版导入）",
++ "Automatic": "自动",
++ "BATTLE CARDS (99 EACH, 999 IN ALL)": "战斗卡（每种最多 99 张，总计 999 张）",
++ "Back up and save": "备份并保存",
++ "Back up save": "备份存档",
++ "Backup saved to backups/": "备份已保存到 backups/",
++ "Battle cards raised": "抬高手牌",
++ "Battle zoom": "战斗缩放",
++ "Being tested: expect visual glitches.": "测试中，画面可能出现异常。",
++ "Beta: original multiplayer rooms, without Steam. Open Link battle in the game.": "测试功能：无需 Steam 即可使用原版联机房间。请在游戏中打开联机对战。",
++ "Border (Original view)": "边框（原版画面）",
++ "Button theme": "按键主题",
++ "Buttons pressed and released: %d / 15": "已按下并松开的按钮：%d / 15",
++ "CHARACTER": "角色",
++ "CONTROLLER CHECK": "手柄检测",
++ "CONTROLS": "操控",
++ "COPY THE PC'S HD FOLDER": "复制电脑端的 HD 文件夹",
++ "CRT output": "CRT 输出",
++ "Cancel": "取消",
++ "Cancel test": "取消测试",
++ "Cannot start in 64-bit mode: Windows x64 and the complete bin64 files are required.": "64 位模式需要 Windows x64 和完整的 bin64 文件。",
++ "Card": "卡片",
++ "Changes saved; the previous copy is in backups. This save plays in Rebel mode (achievements in their own list).": "更改已保存，旧存档位于 backups/。这个存档会进入叛逆模式，成就单独记录。",
++ "Changes the level, stats and cards of a saved game. It stays off until you turn it on and accept the warning.": "可调整存档中的等级、属性和卡片。启用前需确认提示。",
++ "Check again": "重新检查",
++ "Check imported variants": "检查已导入版本",
++ "Choose a folder outside this installation.": "请选择当前安装目录以外的文件夹。",
++ "Choose folder...": "选择文件夹…",
++ "Choose on start": "启动时选择",
++ "Choose the file at save points": "在存档点选择存档",
++ "Choose your cartridge dump on the phone. Its SHA-1 is checked and it is copied into the app. No ROM is included.": "选择手机上的卡带备份文件。应用会校验 SHA-1 并导入文件。请自行准备 ROM。",
++ "Click a cell and press a key, button, or axis. Delete clears it, Esc cancels. Duplicate bindings are marked in red.": "点击单元格后，按键或拨动摇杆。Delete 清除，Esc 取消。重复绑定以红色标出。",
++ "Close and remove this import": "关闭并移除本次导入",
++ "Close and resume later": "关闭并稍后继续",
++ "Compress what is installed to this quality": "按此画质压缩已导入的影片",
++ "Compressing ": "正在压缩 ",
++ "Compressing...": "正在压缩…",
++ "Conflict: another action uses this binding": "按键冲突：该绑定已被另一操作使用",
++ "Connect to RetroAchievements": "连接 RetroAchievements",
++ "Controller disconnected; test interrupted.": "手柄已断开，测试中断。",
++ "Controls": "操控",
++ "Copies": "数量",
++ "Copies everything (game, ROMs, saves, HD mod) to another folder, e.g. D:/Games/ReKHCoM. This folder is not deleted.": "把游戏、ROM、存档和高清模组复制到其他文件夹，例如 D:/Games/ReKHCoM。当前文件夹会保留。",
++ "Copying ": "正在复制 ",
++ "Could not copy the save.": "无法复制存档。",
++ "Could not create the file.": "无法创建文件。",
++ "Could not install the ROM.": "无法安装 ROM。",
++ "Could not read the file.": "无法读取文件。",
++ "Could not save the report.": "无法保存报告。",
++ "Could not start the game.": "无法启动游戏。",
++ "Could not verify the destination.": "无法验证目标位置。",
++ "Could not write the file (disk full?).": "无法写入文件，请检查剩余空间。",
++ "Could not write the save (the backup is kept).": "无法写入存档，备份已保留。",
++ "Could not write the save. Original preserved.": "无法写入存档，原存档已保留。",
++ "Could not write to the roms folder.": "无法写入 roms 文件夹。",
++ "D-pad ": "方向键 ",
++ "DISPLAY": "显示",
++ "Desktop": "桌面",
++ "Desktop shortcut": "桌面快捷方式",
++ "Desktop uses the monitor's resolution, ultrawide included.": "桌面模式使用显示器分辨率，支持超宽屏。",
++ "Dialogue is drawn with a crisp font at the window's resolution, in the game's own places and colours.": "按窗口分辨率绘制清晰的对话文字，并保留原版的位置和颜色。",
++ "Discard changes": "放弃更改",
++ "Discard that import": "放弃该次导入",
++ "Discord status": "Discord 游玩状态",
++ "Don't ask again": "不再询问",
++ "Done: ": "已完成：",
++ "Done: %d files in one ReKHCoM-HD.zip. Copy it to %s and start the game: it installs itself.": "已将 %d 个文件打包为 ReKHCoM-HD.zip。复制到 %s 后启动游戏，即可自动安装。",
++ "Done: %d movies compressed, %.1f GB -> %.1f GB.": "已压缩 %d 段影片，%.1f GB → %.1f GB。",
++ "EN signal; audio unverified": "检测到英语标记，音轨待核实",
++ "ENHANCEMENTS": "增强功能",
++ "EXPERIMENTAL": "实验功能",
++ "Earned on your account": "你的账号已获得",
++ "Effects volume": "音效音量",
++ "Enhancements": "增强功能",
++ "Every map card at 9": "所有地图卡各 9 张",
++ "Executable missing": "缺少可执行文件",
++ "Exp": "经验值",
++ "Export save": "导出存档",
++ "Extended (experimental)": "扩展（实验功能）",
++ "Extended 320x180": "扩展 320×180",
++ "Field and battles with depth of field, bloom, colour grading and a vignette, in the manner of Octopath Traveler. Sprites stay sharp.": "为场景和战斗添加类似《歧路旅人》的景深、泛光、调色和暗角，角色图像保持清晰。",
++ "File": "文件",
++ "Fill window": "填满窗口",
++ "Filter": "筛选",
++ "Find achievement...": "搜索成就…",
++ "Find the game": "查找游戏",
++ "First installs whatever you left in the roms folder (ROMs under any name, zips, the HD mod's hd folder); if there is nothing, choose the file (or drop it on this window). Its SHA-1 is checked. No ROM is included.": "优先检查 roms 文件夹中的 ROM、ZIP 或高清模组 hd 文件夹。也可手动选取文件或拖到窗口。ROM 会校验 SHA-1，请自行准备。",
++ "Five banks of the game's two slots; bank 1 is the usual save.": "提供五组存档，每组含游戏原有的两个存档位。第 1 组为常用存档。",
++ "Fixed: options F1 / Esc or Start + Select (on the title screen, Select alone), fullscreen F11 or Alt+Enter, states F5 / F8 (when turned on in Cheats), zoom (Auto view) + / - or Select + Up / Down on the gamepad.": "固定快捷键：F1 / Esc 或 Start + Select 打开设置（标题界面只按 Select）。F11 或 Alt+Enter 切换全屏。F5 / F8 操作即时存档（需在作弊选项中启用）。自动画面下可用 + / - 或手柄 Select + 上 / 下缩放。",
++ "Force 21:9": "强制 21:9",
++ "Force 32-bit": "强制 32 位",
++ "Force 32:9": "强制 32:9",
++ "Force 64-bit": "强制 64 位",
++ "Force Nintendo layout": "强制任天堂布局",
++ "Found:": "已找到：",
++ "Frames of delay on the keys. Auto: from the ping when linking (1-2); higher = fewer rollback corrections on a high ping. The host's choice counts.": "以帧为单位设置输入延迟。自动模式按连接延迟选择 1–2 帧。高延迟时增加帧数可减少回滚。以房主设置为准。",
++ "Full · Good quality, ~3.7 GB (suggested)": "完整 · 高画质，约 3.7 GB（推荐）",
++ "Full · Original quality, ~6.7 GB": "完整 · 原始画质，约 6.7 GB",
++ "Full · Saving, ~2 GB": "完整 · 节省空间，约 2 GB",
++ "Fullscreen": "全屏",
++ "Fullscreen resolution": "全屏分辨率",
++ "GAME": "游戏",
++ "GBA LCD colours": "GBA 液晶配色",
++ "GBA classic": "GBA 经典",
++ "GBA enhanced": "GBA 增强",
++ "GBA title brightness": "GBA 标题亮度设置",
++ "Game language": "游戏语言",
++ "Game:": "游戏：",
++ "Gamepad": "手柄",
++ "Gamepad X, keyboard C: rolls toward the held direction or the way the character faces.": "按手柄 X 或键盘 C，沿按住的方向或角色面朝的方向翻滚。",
++ "Gamepad Y, keyboard D: stock cards or sleights without pressing L and R together.": "按手柄 Y 或键盘 D 即可储备卡片或组合技，无需同时按 L 和 R。",
++ "Good (suggested)": "高画质（推荐）",
++ "Graphics": "画面",
++ "Graphics mode": "画面模式",
++ "HD HUD": "高清 HUD",
++ "HD HUD (pilot)": "高清 HUD（试验）",
++ "HD MOD (BETA) · KINGDOM HEARTS 1.5+2.5": "高清模组（测试版）· 王国之心 1.5+2.5",
++ "HD MOD · IMPORT CUT SHORT": "高清模组 · 导入中断",
++ "HD MOD · KINGDOM HEARTS 1.5+2.5": "高清模组 · 王国之心 1.5+2.5",
++ "HD MOD · LOADING": "高清模组 · 正在加载",
++ "HD graphics: ": "高清图像：",
++ "HD mode": "高清模式",
++ "HD movie audio (separate from text and Undub)": "高清影片音轨（独立于文字和日语配音）",
++ "HD movie availability and language": "高清影片状态和语言",
++ "HD movies": "高清影片",
++ "HD music": "高清音乐",
++ "HD scenes (full mod)": "高清过场（完整模组）",
++ "HD subtitles": "高清字幕",
++ "HD text": "高清文字",
++ "HD text font": "高清文字字体",
++ "HD-2D look": "HD-2D 画面",
++ "HUD size": "HUD 大小",
++ "Hide with a controller connected": "连接手柄时隐藏",
++ "Home": "首页",
++ "Host's IP": "房主 IP",
++ "I confirm the source audio is the language I selected (not automatically verified)": "我确认源音轨为所选语言（未自动验证）",
++ "IP: host": "IP：开房",
++ "IP: join": "IP：加入",
++ "Import GBA save... (experimental)": "导入 GBA 存档…（实验功能）",
++ "Import stopped.": "导入已停止。",
++ "Importing variant ": "正在导入版本 ",
++ "Importing...": "正在导入…",
++ "In Rebel mode: ": "叛逆模式：",
++ "In Rebel mode: progress is separate from the normal list and CoM.": "叛逆模式的进度单独记录。",
++ "In the collection:": "卡片收藏：",
++ "In the roms folder: ": "roms 文件夹中：",
++ "Incomplete copy in": "发现未完成的复制，位置：",
++ "Input delay (online)": "联机输入延迟",
++ "Install ROM...": "安装 ROM…",
++ "Install in another folder...": "安装到其他文件夹…",
++ "Install the Japanese ROM →": "安装日版 ROM →",
++ "Install this version's ROM to play.": "请安装对应区版的 ROM 后开始游戏。",
++ "Installation not confirmed or update pending: wait for Steam and check again.": "安装尚未确认或仍有更新，请等待 Steam 完成后再次检查。",
++ "Installed in": "已安装到",
++ "Invert card scrolling": "反转卡片滚动方向",
++ "It takes a few minutes and the launcher stays usable; everything stays in Enhancements.": "处理需要几分钟，期间可继续使用启动器。完成后可在增强功能中查看。",
++ "It was not in Steam's game list; nothing was changed.": "Steam 库中没有该游戏，未进行更改。",
++ "JP signal; audio unverified": "检测到日语标记，音轨待核实",
++ "Just the basics: movies, music and HUD (~0.6 GB)": "基础内容：影片、音乐与 HUD（约 0.6 GB）",
++ "Just the basics: movies, music and HUD, ~0.6 GB": "基础内容：影片、音乐与 HUD，约 0.6 GB",
++ "KHMenu is the game's; System is the computer's own. Subtitles always keep theirs.": "KHMenu 为游戏字体，系统字体由设备提供。字幕始终保留原字体。",
++ "KINGDOM HEARTS HD 1.5+2.5 is installed on this PC. Load Re:Chain of Memories' movies, music, scenes and HUD? Choose how much space to use:": "在此电脑上找到了《王国之心 HD 1.5+2.5》。可导入《记忆之链重制版》的影片、音乐、过场和 HUD，请选择占用空间。",
++ "KINGDOM HEARTS HD 1.5+2.5 was not found on Steam or Epic; if it is on another platform or folder, choose it.": "未找到 Steam 或 Epic 安装的《王国之心 HD 1.5+2.5》。如果装在其他位置，请手动选择。",
++ "Keep loading": "继续加载",
++ "Keyboard": "键盘",
++ "Keyboard 2": "键盘 2",
++ "Kind": "类别",
++ "LOAD EVERYTHING FROM THE GAME": "从游戏导入全部内容",
++ "Large": "大",
++ "Larger": "更大",
++ "Later": "稍后",
++ "Level": "等级",
++ "Level (1-99)": "等级（1–99）",
++ "Load again or change the quality...": "重新加载或更改画质…",
++ "Load the HD assets in Enhancements →": "在增强功能中导入高清内容 →",
++ "Locked": "未解锁",
++ "Looking in roms...": "正在搜索 roms 文件夹…",
++ "MAP CARDS (AT MOST 9 EACH)": "地图卡（每种最多 9 张）",
++ "Make ReKHCoM-HD.zip": "生成 ReKHCoM-HD.zip",
++ "Makes one file with what is loaded here for Android or a console: copy it to the game's folder there and the game installs it by itself when it starts.": "将已导入内容打成一个包，供安卓或主机使用。复制到对应设备的游戏目录后，启动游戏即可自动安装。",
++ "Map card": "地图卡",
++ "Master volume": "主音量",
++ "Max HP": "最大 HP",
++ "Max HP (up to 560)": "最大 HP（上限 560）",
++ "Maximum 384x216": "最大 384×216",
++ "Media Foundation is not available: nothing was compressed.": "Media Foundation 不可用，压缩未执行。",
++ "Moogle points": "莫古力点数",
++ "Moogle points notice": "莫古力点数提示",
++ "Movie compression": "影片压缩",
++ "Movies": "影片",
++ "Movies:": "影片：",
++ "Music": "音乐",
++ "Music volume": "音乐音量",
++ "Music:": "音乐：",
++ "Music: ": "音乐：",
++ "NINTENDO CONTROLLER": "任天堂手柄",
++ "Network link (alpha)": "网络联机（测试版）",
++ "No HD mod loaded yet.": "尚未加载高清模组。",
++ "No ROM": "未安装 ROM",
++ "No achievements match this filter.": "没有符合条件的成就。",
++ "No complete valid imported variant. Import your source with that label, or use the Steam guide and check again.": "没有完整可用的对应版本。请导入带此语言标签的素材，或按 Steam 指南操作后重新检查。",
++ "No room left: 99 per card, 999 in the collection.": "已达数量上限：每种 99 张，收藏总计 999 张。",
++ "No save for this version yet.": "这个版本还没有存档。",
++ "Not loaded": "未加载",
++ "Not now": "暂不",
++ "Nothing to import was found in that folder.": "该文件夹中没有可导入的内容。",
++ "OFFICIAL ACHIEVEMENTS · EUROPEAN VERSION": "官方成就 · 欧版",
++ "OTHER": "其他",
++ "Off": "关闭",
++ "Off (cable)": "关闭（通信线）",
++ "Official": "官方",
++ "Official Steam language help": "Steam 官方语言帮助",
++ "Official game page": "游戏官方页面",
++ "On": "开启",
++ "On the phone the mod comes ready from the PC: copy to the phone the hd folder the PC launcher builds (in ReKHCoM's folder) and choose it here. The scenes take several GB: copy only what you want. A second copy only adds what is new.": "把电脑启动器生成的 hd 文件夹复制到手机，再在这里选中。过场需要数 GB，可按需复制。再次导入时只添加新文件。",
++ "On wider monitors, 16:9 or 21:9 leave black bars at the sides.": "在更宽的显示器上，选择 16:9 或 21:9 会在两侧留黑边。",
++ "One-button dodge roll": "一键翻滚",
++ "One-button stock (L+R)": "一键储备卡片（L+R）",
++ "Only does what is missing, broken or at another quality.": "仅处理缺失、损坏或画质不同的文件。",
++ "Open folder": "打开文件夹",
++ "Open from there (closes this one)": "从该位置打开（关闭当前窗口）",
++ "Opens a GitHub report with the version and the end of the game's log; you review and submit it (needs a GitHub account).": "在 GitHub 打开包含版本号和日志末尾的报告草稿，登录后可检查并提交。",
++ "Opens official help: Library > Properties > Language. Use your own copy; Steam manages the download.": "打开官方帮助。可在 Steam 库的游戏属性中设置语言，Steam 会处理下载。",
++ "Optional account: the official achievements on retroachievements.org too.": "可选：连接账号后同时记录到 retroachievements.org。",
++ "Optional: achievements are earned without an account too. With the account connected you also see its progress.": "本地可直接取得成就，连接账号后还能查看账号进度。",
++ "Original": "原版",
++ "Original 240x160": "原版 240×160",
++ "Original shot": "原版构图",
++ "PICTURE": "画面",
++ "PLAY": "开始游戏",
++ "PREVIEW · ACHIEVEMENT": "预览 · 成就",
++ "Packing ": "正在打包 ",
++ "Password": "密码",
++ "Picking up moogle points on the field shows how many and the total. Off by default.": "在场景内拾取莫古力点数时显示本次获得量和总数。默认关闭。",
++ "Pixel scale: x4 enlarges each pixel four times. Lower scales show more world and cost more CPU.": "像素倍率：×4 将每个像素放大四倍。倍率越低，可见范围越大，CPU 开销也越高。",
++ "Points: %u · Softcore: %u": "积分：%u · 普通模式：%u",
++ "Press and release every button, move both sticks in every direction, and press/release LT and RT, together and separately. Use the mouse to finish.": "按下并松开每个按键，将两个摇杆向各个方向拨动，再分别和同时按下并松开 LT、RT。最后用鼠标完成。",
++ "Press...": "请按键…",
++ "RE:COM ACHIEVEMENTS · ON THIS COMPUTER ONLY": "重制模式成就 · 仅本机",
++ "RE:COM ACHIEVEMENTS · REBEL MODE": "重制模式成就 · 叛逆模式",
++ "ROM installed and verified: ": "ROM 已安装并通过校验：",
++ "Re-encoding ": "正在重新编码 ",
++ "Re-encoding takes a few minutes (the full mod, about 10 min on a current PC; more on an older one).": "重新编码需要几分钟。完整模组在较新的电脑上约需 10 分钟，旧电脑会更久。",
++ "Re:Chain of Memories' HD music, movies and scenes: in Enhancements →": "在增强功能中导入《记忆之链重制版》的高清音乐、影片和过场 →",
++ "Re:Chain of Memories' cards, HUD, music, movies and scenes, from your KINGDOM HEARTS HD 1.5+2.5.": "从已安装的《王国之心 HD 1.5+2.5》导入重制版卡片、HUD、音乐、影片和过场。",
++ "Replaces supported GBA movies with HD versions. Credits use the GBA version.": "用高清版替换支持的 GBA 影片。制作人员名单仍使用 GBA 版。",
++ "Re:Chain of Memories' soundtrack in place of the GBA music.": "以《记忆之链重制版》原声替换 GBA 音乐。",
++ "Re:Chain of Memories' story scenes in place of the GBA ones where they match, with subtitles in the game's language. Off by default.": "使用重制版的对应过场替换 GBA 过场，字幕跟随游戏语言。默认关闭。",
++ "Re:Chain of Memories' subtitles over the HD movies and scenes, in the game's language.": "为高清影片和过场显示字幕，语言跟随游戏设置。",
++ "Re:CoM": "重制模式",
++ "Re:CoM mode": "重制模式",
++ "ReKHCoM server - Beta": "ReKHCoM 服务器（测试版）",
++ "Rebel mode": "叛逆模式",
++ "Redrawn HD enemy HP frame. Pilot for wide views; other elements keep their original graphics.": "在宽屏下试用重绘的高清敌人血条边框，其他元素保留原版图像。",
++ "Relay: join a room": "中继：加入房间",
++ "Relay: open a room": "中继：创建房间",
++ "Remember this account on Windows": "在 Windows 上记住此账号",
++ "Remove from Steam": "从 Steam 移除",
++ "Removed from Steam. If Steam is open, restart it to see it gone from the library.": "已从 Steam 移除。若 Steam 正在运行，请重启后查看。",
++ "Report a problem...": "报告问题…",
++ "Report saved: controller_report.txt": "报告已保存：controller_report.txt",
++ "Requires the verified original Japanese ROM in roms/B8CJ.gba. Applied when starting the game; keeps European or English text.": "需要已校验的日版原始 ROM（roms/B8CJ.gba）。下次启动应用，文字保留原区版语言。",
++ "Reset controls": "重置按键",
++ "Restores the title's Brightness button and L/R shortcuts. They compensated for the original GBA screen and are unnecessary on modern displays. Always available in GBA Original.": "恢复标题界面的亮度按钮和 L/R 快捷键。原版 GBA 模式始终提供此功能。",
++ "Resume": "继续",
++ "Resuming keeps what is loaded and goes on from there next time. Removing takes away only what this import copied: what you had before and your saves stay.": "选择继续会保留导入进度。选择移除只会删除本次导入的文件，原有内容和存档会保留。",
++ "Return stocked cards": "收回已储备卡片",
++ "Reverses L/R and right-stick horizontal card scrolling in battle. Menus and L+R combinations stay unchanged. Off by default.": "反转战斗时 L/R 和右摇杆的横向选卡方向。菜单和 L+R 组合键沿用原设定。默认关闭。",
++ "Review and save changes...": "检查并保存修改…",
++ "Room code": "房间代码",
++ "Rooms in the game (Steam)": "游戏内房间（Steam）",
++ "Rooms in the game (server)": "游戏内房间（服务器）",
++ "SAVE": "存档",
++ "SAVE EDITOR": "存档编辑器",
++ "SCREEN": "屏幕",
++ "SDL does not detect a controller. Connect one over USB or Bluetooth; it will appear here automatically.": "未检测到手柄。通过 USB 或蓝牙连接后，手柄会自动出现。",
++ "SOUND": "声音",
++ "Same as main zoom": "跟随常规缩放",
++ "Save bank": "存档组",
++ "Save imported into": "存档已导入到",
++ "Save manager": "存档管理",
++ "Save report and finish": "保存报告并结束",
++ "Save:": "存档：",
++ "Saving": "节省空间",
++ "Scene framing": "场景构图",
++ "Scenes": "过场",
++ "Scenes:": "过场：",
++ "Server": "服务器",
++ "Settings": "设置",
++ "Sharp": "锐利",
++ "Shortcut created on the desktop: it opens the game without the launcher.": "已创建桌面快捷方式，可直接打开游戏。",
++ "Show FPS": "显示帧率",
++ "Show the network state": "显示网络状态",
++ "Sign in": "登录",
++ "Sign out and forget the account": "退出并移除账号记录",
++ "Skip frames when slow": "性能不足时跳帧",
++ "Smooth": "平滑",
++ "Software H.264 decoding": "H.264 软件解码",
++ "Source": "原始画质",
++ "Source HD audio:": "高清源音轨：",
++ "Source files or settings changed. Previous source information was discarded; your existing import is preserved.": "源文件或设置已更改，旧源信息已清除，已有导入内容会保留。",
++ "Source takes the most space (the full mod, about 6.7 GB); Good, about 3.7 GB.": "原始画质占用最多，完整模组约 6.7 GB。高画质约占 3.7 GB。",
++ "Start button and trigger test": "开始按键与扳机测试",
++ "Steam language guide": "Steam 语言指南",
++ "Steam language setting (does not verify audio):": "Steam 语言设置（未校验音轨）：",
++ "Steam was not found (or no account has signed in to it).": "未找到 Steam，或没有已登录的账号。",
++ "Steam's game list could not be read; nothing was changed.": "无法读取 Steam 游戏列表，未进行更改。",
++ "Steam: join a friend": "Steam：加入好友",
++ "Steam: open a room": "Steam：创建房间",
++ "Sticks and centering: %s · LT+RT together: %s": "摇杆与回中：%s · 同时按 LT+RT：%s",
++ "Stopping the import...": "正在停止导入…",
++ "Subtitles": "字幕",
++ "Sure? Replaces your movies with the lighter ones (click again)": "再次点击确认用压缩版替换已导入的影片",
++ "Synchronization": "画面同步",
++ "TOUCH BUTTONS": "触屏按键",
++ "Take the HD mod to another platform": "将高清模组导出到其他平台",
++ "Takes it out of your Steam library (with its cover). Your saves are not touched; you can add it again any time.": "从 Steam 库移除游戏条目和封面。存档会保留，随时可重新添加。",
++ "Text and subtitles follow the game language. Undub uses the Japanese GBA ROM voices and is separate from HD movie audio.": "文字和字幕跟随游戏语言。日语配音来自日版 GBA ROM，高清影片的音轨单独设置。",
++ "That file is not a 32 MiB cartridge dump.": "请选择 32 MiB 的卡带备份文件。",
++ "That folder is not empty: choose an empty one (nothing is overwritten).": "此文件夹非空。请选择空文件夹以保留已有文件。",
++ "The HD mod is loading. Closing now is not ideal: it is best to wait until it finishes.": "高清模组正在加载，建议等待完成后再关闭。",
++ "The HD mod's import did not finish (closed, or the PC went off). %d files are ready: they are checked and it goes on from there.": "上次高清模组导入中断。已有 %d 个文件就绪，将校验后继续导入。",
++ "The audio label was declared by the user. If that variant lacks a scene, the original GBA scene is used.": "音轨语言由用户标注。该版本缺少的过场将使用 GBA 原版。",
++ "The card hand sits partly below the screen edge; raising it shows more of each card.": "手牌底部会被屏幕边缘挡住。抬高后能看到更多卡片内容。",
++ "The cards, the battle HUD and the title logo with Re:Chain of Memories' art. Needs the wide view.": "用重制版图像替换卡片、战斗 HUD 和标题标志。需要宽屏模式。",
++ "The copies left are in a deck.": "剩余卡片已放入卡组。",
++ "The file holds no Chain of Memories save.": "文件中没有《记忆之链》存档。",
++ "The game asks only the first time and remembers your choice; change it here.": "游戏仅在首次启动时询问语言，也可在此处修改。",
++ "The game closed with an error; see kh_com.log.": "游戏异常退出，请查看 kh_com.log。",
++ "The official achievements earned with cheats on. They stay on this computer, in their own list, and are never sent to RetroAchievements.": "启用作弊时获得的官方成就会在本机单独记录。",
++ "The original Japanese voices with your version's text. Needs the Japanese ROM.": "保留当前区版文字，使用原版日语配音。需要日版 ROM。",
++ "The password is sent to RetroAchievements over HTTPS and is never stored. Remembering your account stores a session token encrypted for your Windows user.": "密码通过 HTTPS 发送至 RetroAchievements。启用记住账号时，Windows 会为当前用户加密保存会话令牌。",
++ "The save changed on disk; it was read again and nothing was applied.": "磁盘上的存档已变化，现已重新读取，修改未应用。",
++ "The shortcut could not be created.": "无法创建快捷方式。",
++ "This card has no such value.": "这张卡片没有该点数。",
++ "This file holds no saved game.": "文件中没有游戏存档。",
++ "This is not a Kingdom Hearts: Chain of Memories ROM.": "该 ROM 与《王国之心：记忆之链》不匹配。",
++ "This movie import's language": "本次导入的影片语言",
++ "This version's executable is missing.": "缺少此版本的可执行文件。",
++ "To move them: in the game, Options > Move touch buttons; drag them and tap the tick.": "在游戏设置中选择移动触屏按键，拖动后点勾确认。",
++ "Top left during the link: ping, delay and the last rollback.": "联机时在左上角显示连接延迟、输入延迟和上次回滚。",
++ "Turn on": "开启",
++ "Turn the editor on...": "启用存档编辑器…",
++ "Turn this on if HD videos show green stripes. It takes effect the next time you start the game.": "高清影片出现绿色条纹时可开启。下次启动游戏时生效。",
++ "UDP port": "UDP 端口",
++ "Undub (Japanese voices)": "日语配音",
++ "Unlabelled (legacy Auto)": "无标签（旧版自动）",
++ "Unlocked": "已解锁",
++ "Updating HD graphics this version changed: ": "正在更新此版本改动的高清图像：",
++ "Username": "用户名",
++ "Uses Valve's test app (Spacewar, 480): you do not need to own it.": "使用 Valve 的测试程序 Spacewar（480），无需购买。",
++ "Uses the Re:Chain of Memories movies and soundtrack of your PC Kingdom Hearts HD 1.5+2.5 ReMIX (Steam or Epic). ReKHCoM ships none of it: it copies them from your installation.": "从你在 Steam 或 Epic 安装的《王国之心 HD 1.5+2.5 ReMIX》导入重制版影片和原声。",
++ "VERSIONS": "版本",
++ "VOICES AND HD": "配音与高清内容",
++ "VRR must be enabled in the monitor and driver; falls back to VSync if unavailable.": "需要在显示器和驱动中启用 VRR。不可用时使用垂直同步。",
++ "Value": "点数",
++ "Variant not published: source incomplete, changed, cancelled or invalid. The previous copy is preserved.": "未完成导入，源文件可能不全、变化或无效，操作也可能已取消。旧内容已保留。",
++ "Variant ready: ": "版本已就绪：",
++ "Verified": "已校验",
++ "Version": "版本",
++ "View": "画面范围",
++ "WINDOW": "窗口",
++ "Warning: editing a save can leave it in a state the game does not expect (for example, skipping the balance of its battles). A copy is kept in backups/ before every change, and the game should be closed while you edit.": "编辑存档可能影响游戏状态或战斗平衡。每次更改都会先备份到 backups/。请关闭游戏后编辑。",
++ "When starting a new game you can choose the version: the original GBA one or Re:CoM, with improvements from Kingdom Hearts Re:Chain of Memories (PS2) such as difficulty levels and faster dialogue. Each game remembers its own. Off, everything stays as the original cartridge.": "开始新游戏时可选择 GBA 原版或重制模式。重制模式加入 PS2 版的难度等级、快速对话等功能。各存档会记住选择。关闭此选项时沿用原卡带模式。",
++ "When the device falls behind, that frame is not drawn: the logic and the sound keep the original speed. Verified: the logic stays identical. On by default.": "设备无法及时绘制时会跳过该帧，游戏逻辑与声音保持原速。默认开启。",
++ "Wide 284x160": "宽屏 284×160",
++ "Will change": "将修改",
++ "Window size": "窗口大小",
++ "With Discord open, your profile shows the world, floor, character and level.": "Discord 运行时，个人资料会显示世界、楼层、角色和等级。",
++ "With no controller connected the menu button stays: it is the way into the options.": "未连接手柄时会保留菜单键，方便打开设置。",
++ "Yes": "是",
++ "You choose the label; text, subtitles, music and Undub stay separate. It is stored separately and does not replace another voice.": "请为音轨选择语言标签。该音轨单独保存，文字、字幕、音乐和日语配音由各自选项控制。",
++ "Your name": "你的名字",
++ "Your saves, settings and ROMs were brought over from the previous install: ": "已从旧安装迁移存档、设置和 ROM：",
++ "Zoom (Auto view)": "缩放（自动画面）",
++ "bank": "存档组",
++ "blocks": "区块",
++ "by": "作者：",
++ "checked": "已检查",
++ "files detected; no voice language implied": "个文件已找到，音轨语言待核实",
++ "graphics": "图像",
++ "movies": "影片",
++ "no source files detected": "未检测到源文件",
++ "now": "现在",
++ "pending": "待处理",
++ "scenes": "过场",
++ "steam_api.dll is missing next to the game.": "游戏目录中缺少 steam_api.dll。",
++ "tracks": "音轨",
++ "unknown language": "未知语言"
++}
+diff --git a/port/decompui/rom_folder.inc b/port/decompui/rom_folder.inc
+index eca25c99a26383473967a4e9f40cfc8add1b6c46..496eca424ba77ff2715d3521901cc852823d38dc 100644
+--- a/port/decompui/rom_folder.inc
++++ b/port/decompui/rom_folder.inc
+@@ -43,24 +43,25 @@ static bool Recycle(const fs::path& p) {
+ #endif
+ }
+ 
+-static int VersionOf(const std::vector<unsigned char>& rom) {
++static int VersionOf(const std::vector<unsigned char>& rom, bool& chinese) {
++    chinese = false;
+     if (rom.size() != kRomSize)
+         return -1;
+-    for (int v = 0; v < kVersionCount; v++)
+-        if (std::memcmp(rom.data() + 0xAC, kVersions[v].code, 4) == 0 && Sha1Hex(rom) == kVersions[v].sha1)
++    for (int v = 0; v < kVersionCount; v++) {
++        if (std::memcmp(rom.data() + 0xAC, kVersions[v].code, 4) != 0)
++            continue;
++        const std::string hash = Sha1Hex(rom);
++        chinese = v == kJapaneseVersion && hash == kChineseRomSha1;
++        if (chinese || hash == kVersions[v].sha1)
+             return v;
++    }
+     return -1;
+ }
+ 
+-static bool Installed(int v) {
+-    std::vector<unsigned char> rom;
+-    return ReadFile(RomPath(v), rom) && Sha1Hex(rom) == kVersions[v].sha1;
+-}
+-
+-static bool WriteRom(int v, const std::vector<unsigned char>& rom) {
++static bool WriteRom(int v, bool chinese, const std::vector<unsigned char>& rom) {
+     std::error_code ec;
+     fs::create_directories(sRoot / "roms", ec);
+-    fs::path tmp = RomPath(v);
++    fs::path tmp = RomPath(v, chinese);
+     tmp += ".tmp";
+     {
+         std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
+@@ -68,7 +69,7 @@ static bool WriteRom(int v, const std::vector<unsigned char>& rom) {
+         if (!out)
+             return false;
+     }
+-    fs::rename(tmp, RomPath(v), ec);
++    fs::rename(tmp, RomPath(v, chinese), ec);
+     return !ec;
+ }
+ 
+@@ -127,14 +128,15 @@ static void Zip(const fs::path& path, Result& r) {
+                 rom.assign((unsigned char*)data, (unsigned char*)data + n);
+                 mz_free(data);
+             }
+-            int v = VersionOf(rom);
++            bool chinese;
++            int v = VersionOf(rom, chinese);
+             if (v < 0) {
+                 all = false;
+                 continue;
+             }
+             any = true;
+-            if (!Installed(v)) {
+-                if (WriteRom(v, rom)) {
++            if (!VerifiedRomInstalled(v, chinese)) {
++                if (WriteRom(v, chinese, rom)) {
+                     r.roms++;
+                     r.versions.push_back(v);
+                 } else {
+@@ -264,24 +266,27 @@ static void Scan() {
+                 bool canonical = false;
+                 for (int v = 0; v < kVersionCount; v++)
+                     canonical |= fs::exists(RomPath(v), ec) && fs::equivalent(p, RomPath(v), ec);
++                const fs::path chinesePath = RomPath(kJapaneseVersion, true);
++                canonical |= fs::exists(chinesePath, ec) && fs::equivalent(p, chinesePath, ec);
+                 if (canonical)
+                     continue;
+                 std::vector<unsigned char> rom;
+                 if (!ReadFile(p, rom))
+                     continue;
+-                int v = VersionOf(rom);
++                bool chinese;
++                int v = VersionOf(rom, chinese);
+                 if (v < 0) /* not a clean dump of this game: left alone */
+                     continue;
+-                if (Installed(v)) {
++                if (VerifiedRomInstalled(v, chinese)) {
+                     if (Recycle(p))
+                         r.recycled++;
+                     continue;
+                 }
+                 fs::create_directories(sRoot / "roms", ec);
+-                fs::rename(p, RomPath(v), ec);
++                fs::rename(p, RomPath(v, chinese), ec);
+                 if (ec) {
+                     ec.clear();
+-                    if (!WriteRom(v, rom))
++                    if (!WriteRom(v, chinese, rom))
+                         continue;
+                     Recycle(p);
+                 }
+@@ -330,7 +335,7 @@ static void RomFolderPoll(SDL_Window* window) {
+         if (r.roms || r.hdFiles || r.recycled) {
+             std::string text = T("En la carpeta roms: ", "In the roms folder: ");
+             for (size_t i = 0; i < r.versions.size(); i++)
+-                text += std::string(i ? ", " : "") + T("ROM ", "") + T(kVersions[r.versions[i]].regionEs, kVersions[r.versions[i]].regionEn) +
++                text += std::string(i ? ", " : "") + T("ROM ", "") + RegionName(r.versions[i]) +
+                         T(" instalada", " ROM installed");
+             char extra[200];
+             if (r.hdFiles) {
+diff --git a/port/decompui/save_editor_page.inc b/port/decompui/save_editor_page.inc
+index 9296f11ccd9a40863f6413f4ad3489db858ff640..edc72fa7f9500cccb7c52bb94310d544f1c83d00 100644
+--- a/port/decompui/save_editor_page.inc
++++ b/port/decompui/save_editor_page.inc
+@@ -210,7 +210,7 @@ static void PageEditor(SDL_Window* window) {
+     /* which save: version, bank (the game's own setting) and file */
+     const char* versions[kVersionCount];
+     for (int v = 0; v < kVersionCount; v++)
+-        versions[v] = T(kVersions[v].regionEs, kVersions[v].regionEn);
++        versions[v] = RegionName(v);
+     CycleRow(T("Versión", "Version"), nullptr, sEdVersion, kVersionCount, versions);
+     const char* const* files = sSpanish ? kFileNamesEs : kFileNamesEn;
+     CycleRow(T("Archivo", "File"), nullptr, sEdFile, 4, files);
+diff --git a/port/tools/launcher_strings.py b/port/tools/launcher_strings.py
+index 4e4298ec9bd2fd4c00bc2eb99323062be552fabe..6dd726171710d68dc66952595879d6ce6e2c1723 100644
+--- a/port/tools/launcher_strings.py
++++ b/port/tools/launcher_strings.py
+@@ -12,7 +12,7 @@ from pathlib import Path
+ ROOT = Path(__file__).resolve().parents[2]
+ SRC = ROOT / 'port' / 'decompui'
+ OUT = SRC / 'i18n'
+-LANGS = ('fr', 'de', 'it', 'ja')
++LANGS = ('fr', 'de', 'it', 'ja', 'zh')
+ 
+ 
+ def literal(s, i):
+@@ -70,13 +70,13 @@ def c_literal(text):
+ 
+ 
+ def emit(rows):
+-    """port/decompui/i18n_table.inc: {en, fr, de, it, ja} per text (nullptr where a language lacks it: English)."""
++    """Emit the English key followed by the translations in LANGS order."""
+     tables = {}
+     for lang in LANGS:
+         path = OUT / (lang + '.json')
+         tables[lang] = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
+     lines = ['/* Generated by port/tools/launcher_strings.py --emit from the JSON files in port/decompui/i18n: do not edit. */',
+-             'static const char* const kI18n[][5] = {']
++             f'static const char* const kI18n[][{1 + len(LANGS)}] = {{']
+     for r in rows:
+         cells = [c_literal(r['en'])]
+         for lang in LANGS:
