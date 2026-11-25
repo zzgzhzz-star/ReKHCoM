@@ -23,6 +23,9 @@
 #include "engine.h"
 #include "port/port.h"
 #include "port/controller_prompt_glyphs.h"
+#ifdef VERSION_JP
+#include "port/zh_dialogue.h"
+#endif
 #endif
 
 static SpriteTextLine* sSpriteTextLines;
@@ -1815,7 +1818,15 @@ u8 LayoutMsgGlyphs(s32 x, s32 y, const MsgLatinChar* text) {
 }
 
 #ifndef VERSION_EU
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+static u8 LayoutMsgGlyphsSjisInternal(s32 x, s32 y, const u8* text, s32 chinese) {
+    const u8* rom = (const u8*)(uintptr_t)GBA_ROM;
+    s32 advance = chinese ? 0xC00 : 0xA00;
+    s32 lineHeight = chinese ? 0xD00 : 0xC00;
+    s32 rightEdge = chinese ? 0x9100 : 0x8C00;
+#else
 u8 LayoutMsgGlyphsSjis(s32 x, s32 y, const u8* text) {
+#endif
     u16 glyph;
     u8 bank;
     s32 cx;
@@ -1835,20 +1846,40 @@ u8 LayoutMsgGlyphsSjis(s32 x, s32 y, const u8* text) {
 
     while (*text != MSG_CODE_END) {
         u16 code;
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+        const u8* chineseTiles = NULL;
+        if (chinese && sTextEntryCount >= ZH_DIALOGUE_MAX_GLYPHS)
+            break;
+#endif
         glyph = 0;
         sMsgGlyphSprites[sTextEntryCount].x = x + cx;
         sMsgGlyphSprites[sTextEntryCount].y = y + cy;
 
         sMsgGlyphSprites[sTextEntryCount].visible = TRUE;
 
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+        code = (u16)text[0] << 8 | text[1];
+        if (code == MSG_CODE_JP_NL) {
+#else
         if (*(u16*)text == MSG_CODE_JP_NL) {
+#endif
             cx = 0;
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+            cy += lineHeight;
+#else
             cy += 0xC00;
+#endif
             text += 2;
         } else {
+#if !defined(PLATFORM_PC) || !defined(VERSION_JP)
             code = *(u16*)text;
             code = (code / 256) | (code << 8);
+#endif
             text += 2;
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+            if (chinese)
+                chineseTiles = PortChineseDialogueGlyph(rom, code);
+#endif
 
             if ((code & 0xFF00) == 0x8100) {
                 switch (code & 0xFF) {
@@ -1979,12 +2010,20 @@ u8 LayoutMsgGlyphsSjis(s32 x, s32 y, const u8* text) {
                      (code == 0x8148 || code == 0x8149)) &&
                     cx == 0 && cy > 0) {
                     cx = px;
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+                    cx += advance;
+                    cy -= lineHeight;
+#else
                     cx += 0xA00;
                     cy -= 0xC00;
+#endif
                     sMsgGlyphSprites[sTextEntryCount].x = x + cx;
                     sMsgGlyphSprites[sTextEntryCount].y = y + cy;
                 }
             } else {
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+                if (!chineseTiles)
+#endif
                 GetSjisGlyph(code, &glyph, &bank);
             }
 
@@ -1992,11 +2031,25 @@ u8 LayoutMsgGlyphsSjis(s32 x, s32 y, const u8* text) {
                 ReleaseObjTiles(sMsgGlyphSprites[sTextEntryCount].tiles);
             }
 
-#ifdef PLATFORM_PC
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+            /* Patched glyph codes are not Unicode or Shift-JIS. Keep their original tiles in HD mode. */
+            sMsgGlyphCodes[sTextEntryCount] = chinese ? 0 : code;
+#elif defined(PLATFORM_PC)
             sMsgGlyphCodes[sTextEntryCount] = code; /* Shift-JIS, for the HD text */
 #endif
             px = cx;
 
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+            cx += advance;
+            if (cx > rightEdge) {
+                cx = 0;
+                cy += lineHeight;
+            }
+            if (chineseTiles) {
+                sMsgGlyphSprites[sTextEntryCount++].tiles = LoadObjTiles(chineseTiles, ZH_DIALOGUE_GLYPH_BYTES);
+                continue;
+            }
+#else
             if ((u16)(code - 0x8260) <= 58) {
                 cx += 0xA00;
             } else {
@@ -2007,6 +2060,7 @@ u8 LayoutMsgGlyphsSjis(s32 x, s32 y, const u8* text) {
                 cx = 0;
                 cy += 0xC00;
             }
+#endif
 
             switch (bank) {
             case 0:
@@ -2033,6 +2087,15 @@ u8 LayoutMsgGlyphsSjis(s32 x, s32 y, const u8* text) {
 
     return sTextEntryCount;
 }
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+u8 LayoutMsgGlyphsSjis(s32 x, s32 y, const u8* text) {
+    return LayoutMsgGlyphsSjisInternal(x, y, text, FALSE);
+}
+
+u8 LayoutMsgGlyphsChinese(s32 x, s32 y, const u8* text) {
+    return LayoutMsgGlyphsSjisInternal(x, y, text, TRUE);
+}
+#endif
 #endif
 
 #ifdef VERSION_EU

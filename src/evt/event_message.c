@@ -62,6 +62,10 @@ int PortIsoScene(int eventId);
 #include "text_types.h"
 #include "event_ids.h"
 #include "fld_types.h"
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+#include "port/port.h"
+#include "port/zh_dialogue.h"
+#endif
 
 static void msgwin_0(MsgWinWork* work, u8* arg);
 static u8 msgwin_1(MsgWinWork* work, void* task);
@@ -6660,6 +6664,52 @@ static const u8 sMsgwinNoText[] = { MSG_CODE_END };
 #define MSGWIN_TEXT(entry) LANGSTR((entry)->text)
 #endif
 
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+static const struct {
+    u32 offset;
+    u8 count;
+} sChineseDialogueScripts[EVENT_COUNT] = {
+#include "port/zh_dialogue_scripts.inc"
+};
+static const u8* sChineseDialogueRom;
+
+void PortCheckChineseDialogueRom(const u8* rom) {
+    sChineseDialogueRom = PortIsChineseDialogueRom(rom) ? rom : NULL;
+}
+
+static const u8* MsgwinChineseText(const MsgWinWork* work, const MessageScriptEntry* entry) {
+    const u8* row;
+    uintptr_t romBase;
+    u32 pointer;
+    u32 offset;
+
+    if (!sChineseDialogueRom || (unsigned)work->eventId >= EVENT_COUNT ||
+        (unsigned)work->scriptIndex >= sChineseDialogueScripts[work->eventId].count)
+        return NULL;
+
+    row = sChineseDialogueRom + sChineseDialogueScripts[work->eventId].offset
+          + (unsigned)work->scriptIndex * ZH_DIALOGUE_SCRIPT_STRIDE;
+    if (PortChineseDialogueReadWord(row) != entry->portraitId ||
+        PortChineseDialogueReadWord(row + 4) != entry->expressionId ||
+        PortChineseDialogueReadWord(row + 8) != entry->positionIndex ||
+        row[12] != entry->charDelay ||
+        PortChineseDialogueReadWord(row + 20) != ((u32)entry->frame << 16 | entry->flags))
+        return NULL;
+
+    pointer = PortChineseDialogueReadWord(row + 16);
+    /* Relocatable builds have already moved the pointer to their mapped ROM. */
+#ifdef PORT_GBA_RELOC
+    romBase = (uintptr_t)sChineseDialogueRom;
+#else
+    romBase = ZH_DIALOGUE_ROM_BUS_BASE;
+#endif
+    if (pointer < romBase || pointer - romBase >= ZH_DIALOGUE_ROM_SIZE)
+        return NULL;
+    offset = pointer - romBase;
+    return PortChineseDialogueText(sChineseDialogueRom, offset);
+}
+#endif
+
 void MsgwinLoadEntry(MsgWinWork* work) {
     const MessageScriptEntry* entry = &work->script[work->scriptIndex];
     s32 position;
@@ -6680,11 +6730,21 @@ void MsgwinLoadEntry(MsgWinWork* work) {
     SetMsgfacePortrait(&work->face, entry->portraitId, entry->expressionId, work->position);
 
 #ifdef VERSION_JP
+#ifdef PLATFORM_PC
+    {
+        const u8* chinese = MsgwinChineseText(work, entry);
+        s32 x = entry->portraitId == PORTRAIT_NONE ? 0x2E00 : gMsgwinTextX[work->position];
+        s32 y = gMsgwinTextY[work->position];
+        work->charCount = chinese ? LayoutMsgGlyphsChinese(x, y, chinese)
+                                  : LayoutMsgGlyphsSjis(x, y, MSGWIN_TEXT(entry));
+    }
+#else
     if (entry->portraitId == PORTRAIT_NONE) {
         work->charCount = LayoutMsgGlyphsSjis(0x2E00, gMsgwinTextY[work->position], (u8*)MSGWIN_TEXT(entry));
     } else {
         work->charCount = LayoutMsgGlyphsSjis(gMsgwinTextX[work->position], gMsgwinTextY[work->position], (u8*)MSGWIN_TEXT(entry));
     }
+#endif
 #else
     // @bug In EU, EVENT_196_DAMI_JUUJIRO has no text (NULL read).
     if (entry->portraitId == PORTRAIT_NONE) {

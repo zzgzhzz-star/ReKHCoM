@@ -10,6 +10,9 @@
 #include <string.h>
 
 #include "port/port.h"
+#ifdef VERSION_JP
+#include "port/zh_dialogue.h"
+#endif
 #include "port/rom_relocs.h"
 #include "bridge_calls.h"
 
@@ -79,6 +82,9 @@ static int TryRom(const char* path) {
         return 0;
     }
     fclose(f);
+#ifdef VERSION_JP
+    PortCheckChineseDialogueRom((const uint8_t*)(uintptr_t)GBA_ROM);
+#endif
     PortLog("ROM: %s", path);
     return 1;
 }

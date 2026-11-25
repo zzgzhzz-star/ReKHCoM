@@ -14,6 +14,9 @@ u16 InitMsgGlyphSpritesAltPalette3(s32 mode);
 #ifndef VERSION_EU
 u8 LayoutMsgGlyphsSjis(s32 x, s32 y, const u8* text);
 #endif
+#if defined(PLATFORM_PC) && defined(VERSION_JP)
+u8 LayoutMsgGlyphsChinese(s32 x, s32 y, const u8* text);
+#endif
 s32 GetMsgTextWidth(const TextChar* text);
 u8 LayoutMsgGlyphs(s32 x, s32 y, const MsgLatinChar* text);
 void DrawMsgGlyphs(u8 n);
