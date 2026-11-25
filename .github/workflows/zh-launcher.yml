@@ -35,7 +35,9 @@ jobs:
           cp ReKHCoM-v2.9.1-zh-CN.patch "$RUNNER_TEMP/zh.patch"
           git fetch --no-tags --depth=1 https://github.com/MatyMeatBoy/ReKHCoM.git refs/tags/v2.9.1
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = 5ab5b75fc98b0b7cc347d9102e607893f58c4f31
-          git -c core.autocrlf=false switch --detach FETCH_HEAD
+          git config core.autocrlf false
+          git switch --force --detach FETCH_HEAD
+          git checkout-index --force --all
           git apply --index "$RUNNER_TEMP/zh.patch"
           python port/tools/launcher_strings.py --emit
           git diff --exit-code -- port/decompui/i18n/strings.json port/decompui/i18n_table.inc
@@ -74,10 +76,18 @@ jobs:
           python port/tools/package_zh_launcher.py windows upstream.zip "dist/$name" --launcher build/pc/ReKHCoM.exe --font font/ReKHCoM-Zh.ttf --font-license font/OFL.txt
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
           (Get-FileHash "dist/$name").Hash.ToLower() + "  $name" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+      - uses: actions/setup-java@v4
+        if: matrix.platform == 'Android'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        if: matrix.platform == 'Android'
+        with:
+          packages: 'platform-tools ndk;28.2.13676358 build-tools;35.0.0'
       - name: Compile and package both Android ABIs
         if: matrix.platform == 'Android'
         run: |
-          sdkmanager 'ndk;28.2.13676358' 'build-tools;35.0.0'
           mkdir deps
           curl -fL --retry 3 "$SDL/SDL3-3.4.18.tar.gz" -o deps/sdl.tar.gz
           echo '9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3  deps/sdl.tar.gz' | sha256sum -c
