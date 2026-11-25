@@ -1,0 +1,112 @@
+name: ReKHCoM Simplified Chinese launcher
+on:
+  push:
+    branches: [codex/zh-cn]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  RELEASE: https://github.com/MatyMeatBoy/ReKHCoM/releases/download/v2.9.1
+  SDL: https://github.com/libsdl-org/SDL/releases/download/release-3.4.18
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: Windows
+            runner: windows-2022
+          - platform: Android
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply the localization to upstream v2.9.1
+        run: |
+          cp ReKHCoM-v2.9.1-zh-CN.patch "$RUNNER_TEMP/zh.patch"
+          git fetch --no-tags --depth=1 https://github.com/MatyMeatBoy/ReKHCoM.git refs/tags/v2.9.1
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = 5ab5b75fc98b0b7cc347d9102e607893f58c4f31
+          git -c core.autocrlf=false switch --detach FETCH_HEAD
+          git apply --index "$RUNNER_TEMP/zh.patch"
+          python port/tools/launcher_strings.py --emit
+          git diff --exit-code -- port/decompui/i18n/strings.json port/decompui/i18n_table.inc
+      - name: Prepare a Simplified Chinese font subset
+        run: |
+          python -m pip install fonttools==4.55.3
+          mkdir font
+          upstream='https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc'
+          curl -fL --retry 3 "$upstream/NotoSansSC%5Bwght%5D.ttf" -o font/upstream.ttf
+          curl -fL --retry 3 "$upstream/OFL.txt" -o font/OFL.txt
+          python -c 'import json; from pathlib import Path; table = json.loads(Path("port/decompui/i18n/zh.json").read_text(encoding="utf-8")); Path("font/characters.txt").write_text("".join(sorted(set("简体中文" + "".join(table.values())))), encoding="utf-8")'
+          fonttools varLib.instancer font/upstream.ttf wght=400 -o font/regular.ttf
+          pyftsubset font/regular.ttf --text-file=font/characters.txt --output-file=font/ReKHCoM-Zh.ttf
+          mkdir dist
+      - name: Compile and package the Windows launcher
+        if: matrix.platform == 'Windows'
+        shell: pwsh
+        run: |
+          python -m pip install ninja
+          curl.exe -fL --retry 3 'https://github.com/mstorsjo/llvm-mingw/releases/download/20251007/llvm-mingw-20251007-ucrt-x86_64.zip' -o llvm.zip
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ((Get-FileHash llvm.zip).Hash -ne '9b98a1331b9787bbec5da2a2b78704809b91d807c26acc08b9d377292b92baf0') { throw 'LLVM package hash mismatch' }
+          curl.exe -fL --retry 3 "$env:SDL/SDL3-devel-3.4.18-mingw.tar.gz" -o sdl.tar.gz
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ((Get-FileHash sdl.tar.gz).Hash -ne '049b9dd711e3fb3f8d84feb998dfec54a75e17cf539c4a80ff4d058d839771cf') { throw 'SDL package hash mismatch' }
+          Expand-Archive llvm.zip -DestinationPath deps
+          tar -xf sdl.tar.gz -C deps
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python port/configure_pc.py --launcher-only --toolchain deps/llvm-mingw-20251007-ucrt-x86_64 --sdl deps/SDL3-3.4.18
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          ninja -f build/pc/build.ninja build/pc/ReKHCoM.exe
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          curl.exe -fL --retry 3 "$env:RELEASE/ReKHCoM-v2.9.1-windows-x86-x64.zip" -o upstream.zip
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          $name = 'ReKHCoM-v2.9.1-zh-CN-Windows.zip'
+          python port/tools/package_zh_launcher.py windows upstream.zip "dist/$name" --launcher build/pc/ReKHCoM.exe --font font/ReKHCoM-Zh.ttf --font-license font/OFL.txt
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          (Get-FileHash "dist/$name").Hash.ToLower() + "  $name" | Set-Content dist/SHA256SUMS.txt -Encoding ascii
+      - name: Compile and package both Android ABIs
+        if: matrix.platform == 'Android'
+        run: |
+          sdkmanager 'ndk;28.2.13676358' 'build-tools;35.0.0'
+          mkdir deps
+          curl -fL --retry 3 "$SDL/SDL3-3.4.18.tar.gz" -o deps/sdl.tar.gz
+          echo '9c75cf16330322c217dedd2e0609f1124f1b54b8633e763467b4684d0f4334a3  deps/sdl.tar.gz' | sha256sum -c
+          tar -xzf deps/sdl.tar.gz -C deps
+          git clone --depth 1 --branch VER-2-14-3 --recurse-submodules --shallow-submodules https://github.com/freetype/freetype.git deps/freetype
+          ndk="$ANDROID_HOME/ndk/28.2.13676358"
+          for abi in armeabi-v7a arm64-v8a; do
+            cmake -S port/android -B "build/launcher-$abi" -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-21 -DCMAKE_BUILD_TYPE=Release \
+              -DSDL_SOURCE_DIR="$PWD/deps/SDL3-3.4.18" -DFREETYPE_SOURCE_DIR="$PWD/deps/freetype" -DREGIONS=
+            cmake --build "build/launcher-$abi" --target launcher
+            "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "build/launcher-$abi/liblauncher.so"
+          done
+          curl -fL --retry 3 "$RELEASE/ReKHCoM-v2.9.1-android-beta.apk" -o upstream.apk
+          python port/tools/package_zh_launcher.py android upstream.apk unsigned.apk \
+            --launcher build/launcher-armeabi-v7a/liblauncher.so --launcher-arm64 build/launcher-arm64-v8a/liblauncher.so \
+            --font font/ReKHCoM-Zh.ttf --font-license font/OFL.txt
+          tools="$ANDROID_HOME/build-tools/35.0.0"
+          "$tools/zipalign" -P 16 -f 4 unsigned.apk aligned.apk
+          keytool -genkeypair -keystore "$RUNNER_TEMP/zh-debug.p12" -storepass android \
+            -alias rekhcom-debug -keyalg RSA -keysize 2048 -validity 3650 -dname 'CN=ReKHCoM zh-CN test'
+          name=ReKHCoM-v2.9.1-zh-CN-Android.apk
+          "$tools/apksigner" sign --ks "$RUNNER_TEMP/zh-debug.p12" --ks-pass pass:android --out "dist/$name" aligned.apk
+          "$tools/apksigner" verify --verbose "dist/$name"
+          "$tools/zipalign" -c -P 16 4 "dist/$name"
+          (cd dist && sha256sum "$name" > SHA256SUMS.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ReKHCoM-v2.9.1-zh-CN-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
