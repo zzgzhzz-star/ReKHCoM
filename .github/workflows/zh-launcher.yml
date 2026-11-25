@@ -32,10 +32,11 @@ jobs:
           python-version: '3.12'
       - name: Apply the localization to upstream v2.9.1
         run: |
-          cp ReKHCoM-v2.9.1-zh-CN.patch "$RUNNER_TEMP/zh.patch"
+          git show HEAD:ReKHCoM-v2.9.1-zh-CN.patch | tr -d '\r' > "$RUNNER_TEMP/zh.patch"
           git fetch --no-tags --depth=1 https://github.com/MatyMeatBoy/ReKHCoM.git refs/tags/v2.9.1
           test "$(git rev-parse 'FETCH_HEAD^{commit}')" = 5ab5b75fc98b0b7cc347d9102e607893f58c4f31
           git config core.autocrlf false
+          git config core.eol lf
           git switch --force --detach FETCH_HEAD
           git checkout-index --force --all
           git apply --index "$RUNNER_TEMP/zh.patch"
