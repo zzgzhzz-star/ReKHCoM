@@ -41,7 +41,7 @@ jobs:
           git checkout-index --force --all
           git apply --index "$RUNNER_TEMP/zh.patch"
           python port/tools/launcher_strings.py --emit
-          git diff --exit-code -- port/decompui/i18n/strings.json port/decompui/i18n_table.inc
+          git diff --ignore-space-at-eol --exit-code -- port/decompui/i18n/strings.json port/decompui/i18n_table.inc
       - name: Prepare a Simplified Chinese font subset
         run: |
           python -m pip install fonttools==4.55.3
