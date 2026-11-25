@@ -1,0 +1,207 @@
+name: ReKHCoM daily [ZH]
+
+on:
+  schedule:
+    - cron: '17 0 * * *'
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: 'Optional upstream tag. Leave empty for the latest stable release.'
+        type: string
+  push:
+    branches: [main, codex/zh-release-sync]
+    paths: ['.github/workflows/zh-release-sync.yml', 'zh/**']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rekhcom-zh-release-sync
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    if: github.repository == 'zzgzhzz-star/ReKHCoM'
+    runs-on: ubuntu-24.04
+    outputs:
+      needed: ${{ steps.release.outputs.needed }}
+      tag: ${{ steps.release.outputs.tag }}
+      target: ${{ steps.release.outputs.target }}
+      windows_url: ${{ steps.release.outputs.windows_url }}
+      windows_sha: ${{ steps.release.outputs.windows_sha }}
+      android_url: ${{ steps.release.outputs.android_url }}
+      android_sha: ${{ steps.release.outputs.android_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.upstream_tag }}
+        run: python zh/releases.py discover
+
+  build:
+    needs: discover
+    if: needs.discover.outputs.needed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            runner: windows-2022
+          - platform: android
+            runner: ubuntu-24.04
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    env:
+      UPSTREAM_TAG: ${{ needs.discover.outputs.tag }}
+      ASSET_URL: ${{ needs.discover.outputs[format('{0}_url', matrix.platform)] }}
+      ASSET_SHA256: ${{ needs.discover.outputs[format('{0}_sha', matrix.platform)] }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Apply localization to the upstream source tag
+        run: |
+          git init -q source
+          git -C source config core.autocrlf false
+          git -C source config core.eol lf
+          upstream=https://github.com/MatyMeatBoy/ReKHCoM.git
+          git -C source fetch --no-tags --depth=1 "$upstream" refs/tags/v2.9.1
+          test "$(git -C source rev-parse 'FETCH_HEAD^{commit}')" = 5ab5b75fc98b0b7cc347d9102e607893f58c4f31
+          git -C source fetch --no-tags --depth=1 "$upstream" "refs/tags/$UPSTREAM_TAG"
+          git -C source checkout --detach FETCH_HEAD
+          git show HEAD:zh/localization.patch | tr -d '\r' > "$RUNNER_TEMP/localization.patch"
+          git -C source apply --3way "$RUNNER_TEMP/localization.patch"
+          (cd source && python port/tools/launcher_strings.py --emit)
+          python zh/prepare.py source
+      - name: Build the Simplified Chinese font subset
+        run: |
+          python -m pip install fonttools==4.55.3
+          upstream='https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc'
+          curl -fL --retry 3 "$upstream/NotoSansSC%5Bwght%5D.ttf" -o font/upstream.ttf
+          curl -fL --retry 3 "$upstream/OFL.txt" -o font/OFL.txt
+          python -m fontTools.varLib.instancer font/upstream.ttf wght=400 -o font/regular.ttf
+          python -m fontTools.subset font/regular.ttf --text-file=font/characters.txt --output-file=font/ReKHCoM-Zh.ttf
+          curl -fL --retry 3 "$ASSET_URL" -o upstream-package.zip
+      - name: Build Windows launcher and package
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          python -m pip install ninja==1.13.2
+          $llvm = 'llvm-mingw-20251007-ucrt-x86_64'
+          curl.exe -fL --retry 3 "https://github.com/mstorsjo/llvm-mingw/releases/download/20251007/$llvm.zip" -o llvm.zip
+          if ((Get-FileHash llvm.zip).Hash -ne '9b98a1331b9787bbec5da2a2b78704809b91d807c26acc08b9d377292b92baf0') { throw 'LLVM hash mismatch' }
+          curl.exe -fL --retry 3 "https://github.com/libsdl-org/SDL/releases/download/release-$env:SDL_VERSION/SDL3-devel-$env:SDL_VERSION-mingw.tar.gz" -o sdl.tar.gz
+          Expand-Archive llvm.zip -DestinationPath source/deps
+          tar -xf sdl.tar.gz -C source/deps
+          Push-Location source
+          python port/configure_pc.py --launcher-only --toolchain "deps/$llvm" --sdl "deps/SDL3-$env:SDL_VERSION"
+          ninja -f build/pc/build.ninja build/pc/ReKHCoM.exe
+          Pop-Location
+          python zh/build.py windows --upstream upstream-package.zip --sha256 $env:ASSET_SHA256 --launcher source/build/pc/ReKHCoM.exe --font font/ReKHCoM-Zh.ttf --output "dist/ReKHCoM-$env:UPSTREAM_TAG-zh-CN-Windows.zip"
+      - uses: actions/setup-java@v4
+        if: matrix.platform == 'android'
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Verify Android safe-startup routing
+        if: matrix.platform == 'android'
+        run: python source/port/tools/test_android_safe_startup_launch.py
+      - uses: android-actions/setup-android@v3
+        if: matrix.platform == 'android'
+        with:
+          packages: 'platform-tools platforms;android-35 ndk;28.2.13676358 build-tools;35.0.0'
+      - name: Build Android launchers and patched Java importer
+        if: matrix.platform == 'android'
+        run: |
+          sdl="$PWD/deps/SDL3-$SDL_VERSION"
+          ndk="$ANDROID_HOME/ndk/28.2.13676358"
+          curl -fL --retry 3 "https://github.com/libsdl-org/SDL/releases/download/release-$SDL_VERSION/SDL3-$SDL_VERSION.tar.gz" | tar -xz -C deps
+          git clone --depth 1 --branch VER-2-14-3 --recurse-submodules --shallow-submodules https://github.com/freetype/freetype.git deps/freetype
+          for abi in armeabi-v7a arm64-v8a; do
+            cmake -S source/port/android -B "native-$abi" -G Ninja \
+              -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
+              -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-21 -DCMAKE_BUILD_TYPE=Release \
+              -DSDL_SOURCE_DIR="$sdl" -DFREETYPE_SOURCE_DIR="$PWD/deps/freetype" -DREGIONS=
+            cmake --build "native-$abi" --target launcher
+            "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "native-$abi/liblauncher.so"
+          done
+          python zh/build.py android --upstream upstream-package.zip --sha256 "$ASSET_SHA256" \
+            --source source --sdl "$sdl" --launcher native-armeabi-v7a/liblauncher.so --arm64 native-arm64-v8a/liblauncher.so \
+            --font font/ReKHCoM-Zh.ttf --output apk-project
+          (cd apk-project && ./gradlew --no-daemon --max-workers=3 assembleRelease)
+      - name: Stage the unsigned APK
+        if: matrix.platform == 'android'
+        run: |
+          cp apk-project/app/build/outputs/apk/release/app-release-unsigned.apk dist/unsigned.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rekhcom-zh-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  sign:
+    needs: [discover, build]
+    if: needs.discover.outputs.needed == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: rekhcom-zh-android
+          path: input
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'build-tools;35.0.0'
+      - id: sign-apk
+        env:
+          SIGNING_BUNDLE: ${{ secrets.REKHCOM_ANDROID_SIGNING }}
+          UPSTREAM_TAG: ${{ needs.discover.outputs.tag }}
+        run: |
+          mkdir dist
+          python zh/sign.py "$ANDROID_HOME/build-tools/35.0.0" input/unsigned.apk "dist/ReKHCoM-$UPSTREAM_TAG-zh-CN-Android.apk"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rekhcom-zh-signed-android
+          path: dist/*.apk
+          if-no-files-found: error
+
+  publish:
+    needs: [discover, build, sign]
+    if: github.ref_name == github.event.repository.default_branch && needs.discover.outputs.needed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: rekhcom-zh-windows
+          path: dist
+      - uses: actions/download-artifact@v4
+        with:
+          name: rekhcom-zh-signed-android
+          path: dist
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_TAG: ${{ needs.discover.outputs.tag }}
+          TARGET_TAG: ${{ needs.discover.outputs.target }}
+        run: python zh/releases.py publish
