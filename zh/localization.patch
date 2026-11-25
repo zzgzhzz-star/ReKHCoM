@@ -1,8 +1,48 @@
+diff --git a/port/android/CMakeLists.txt b/port/android/CMakeLists.txt
+index aca4abb27bb3080125d8177ecefc9ef875c8e467..7039ea7c65a2aa93dcdd4dfa5acaa15ff58419fe 100644
+--- a/port/android/CMakeLists.txt
++++ b/port/android/CMakeLists.txt
+@@ -34,6 +34,10 @@ add_library(launcher SHARED "${ROOT}/port/decompui/decompui.cpp"
+ target_compile_definitions(launcher PRIVATE LAUNCHER_ANDROID IMGUI_IMPL_OPENGL_ES3 RC_CLIENT_SUPPORTS_HASH)
+ target_include_directories(launcher PRIVATE "${IMGUI}" "${ROOT}/port/decompui/third_party"
+     "${ROOT}/port/third_party/rcheevos/include" "${ROOT}/port/include")
++if(REKHCOM_LAUNCHER_FONT_INCLUDE_DIR)
++    target_include_directories(launcher PRIVATE "${REKHCOM_LAUNCHER_FONT_INCLUDE_DIR}")
++    target_compile_definitions(launcher PRIVATE REKHCOM_BUNDLED_ANDROID_FONT)
++endif()
+ target_compile_options(launcher PRIVATE -O2 -w $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>)
+ target_link_libraries(launcher PRIVATE SDL3::SDL3 GLESv3 EGL log android m)
+ 
 diff --git a/port/android/app/src/main/java/com/rekhcom/android/LauncherActivity.java b/port/android/app/src/main/java/com/rekhcom/android/LauncherActivity.java
-index 3f14b8be792ccb27aad138fe93d672fc19a3b63b..afb49b8bec96ad91d1be29fdeb77aad606ea22e4 100644
+index 3f14b8be792ccb27aad138fe93d672fc19a3b63b..703b21e480f669a4a05752bdc5d6bb34263e3a8b 100644
 --- a/port/android/app/src/main/java/com/rekhcom/android/LauncherActivity.java
 +++ b/port/android/app/src/main/java/com/rekhcom/android/LauncherActivity.java
-@@ -53,19 +53,18 @@ public class LauncherActivity extends StartupSdlActivity {
+@@ -3,7 +3,6 @@ package com.rekhcom.android;
+ import android.content.Intent;
+ import android.net.Uri;
+ import java.io.*;
+-import java.util.Locale;
+ import org.libsdl.app.SDLActivity;
+ 
+ /** The app's first screen: the PC launcher itself (port/decompui, built for Android as liblauncher.so: LAUNCHER_ANDROID)
+@@ -34,8 +33,7 @@ public class LauncherActivity extends StartupSdlActivity {
+     private static volatile int serial;
+     private static volatile String message="";
+     private int pickRegion,pickBank=1;
+-    private boolean english(){return !"es".equals(Locale.getDefault().getLanguage());}
+-    private String t(String es,String en){return english()?en:es;}
++    private String t(String es,String en,String zh){return LauncherUiLanguage.text(LauncherUiLanguage.selected(getFilesDir()),es,en,zh);}
+     private void progress(String text){message=text;}
+ 
+     /** Called by the launcher (any thread): the picker for a dump, a save into region/bank, a save out of it, the hd folder. */
+@@ -47,30 +45,29 @@ public class LauncherActivity extends StartupSdlActivity {
+             if(what==PICK_HD){i=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);}
+             else if(what==PICK_EXPORT){i=new Intent(Intent.ACTION_CREATE_DOCUMENT);i.setType("application/octet-stream");i.addCategory(Intent.CATEGORY_OPENABLE);i.putExtra(Intent.EXTRA_TITLE,SaveImport.bankName(pickRegion,pickBank));}
+             else{i=new Intent(Intent.ACTION_OPEN_DOCUMENT);i.setType("*/*");i.addCategory(Intent.CATEGORY_OPENABLE);i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);}
+-            try{startActivityForResult(i,what);}catch(Exception e){finish(t("No hay un selector de archivos: ","No file picker: ")+e.getMessage(),true);}
++            try{startActivityForResult(i,what);}catch(Exception e){finish(t("No hay un selector de archivos: ","No file picker: ","无法打开文件选择器：")+e.getMessage(),true);}
+         });
+     }
      /** Called by the launcher: the game for region (eu/us/jp) with the dump at rom; kh_com.ini and netlink.cfg are written. */
      public void nativeLaunch(final String region,final String rom){
          if(StartupGameAttempt.valid(getIntent().getStringExtra("startup_attempt"))){
@@ -14,7 +54,8 @@ index 3f14b8be792ccb27aad138fe93d672fc19a3b63b..afb49b8bec96ad91d1be29fdeb77aad6
 -    private void safeLaunchGame(final String region){
 +    private void safeLaunchGame(final String region,final String rom){
              // Admission is on the UI thread even when JNI calls from SDLThread.
-             if(busy)return;busy=true;progress(t("Preparando inicio seguro…","Preparing safe start…"));
+-            if(busy)return;busy=true;progress(t("Preparando inicio seguro…","Preparing safe start…"));
++            if(busy)return;busy=true;progress(t("Preparando inicio seguro…","Preparing safe start…","正在准备安全启动…"));
              new Thread(()->{
                  try{
                      String selected="us".equals(region)?"us":"jp".equals(region)?"jp":"eu";
@@ -25,6 +66,125 @@ index 3f14b8be792ccb27aad138fe93d672fc19a3b63b..afb49b8bec96ad91d1be29fdeb77aad6
                      if(!StartupProcessGate.awaitAbsent(getApplicationContext(),"game"))throw new IOException("Previous game process is still closing");
                      String attempt=java.util.UUID.randomUUID().toString().replace("-","");
                      StartupStageJournal.record(getFilesDir(),"launcher",attempt,android.os.Process.myPid(),"game_requested",0);
+-                    runOnUiThread(()->{if(isFinishing()||isDestroyed())return;Intent i=new Intent().setClassName(getPackageName(),"com.rekhcom.android.GameActivity");i.putExtra("region",selected).putExtra("rom",installed.getAbsolutePath()).putExtra("startup_attempt",attempt);safeChildPending=true;try{startActivityForResult(i,SAFE_GAME);}catch(Exception error){safeChildPending=false;finish(t("No se pudo iniciar: ","Could not start: ")+error.getMessage(),true);}});
+-                }catch(Exception error){finish(t("No se pudo iniciar: ","Could not start: ")+error.getMessage(),true);}
++                    runOnUiThread(()->{if(isFinishing()||isDestroyed())return;Intent i=new Intent().setClassName(getPackageName(),"com.rekhcom.android.GameActivity");i.putExtra("region",selected).putExtra("rom",installed.getAbsolutePath()).putExtra("startup_attempt",attempt);safeChildPending=true;try{startActivityForResult(i,SAFE_GAME);}catch(Exception error){safeChildPending=false;finish(t("No se pudo iniciar: ","Could not start: ","无法启动：")+error.getMessage(),true);}});
++                }catch(Exception error){finish(t("No se pudo iniciar: ","Could not start: ","无法启动：")+error.getMessage(),true);}
+             },"safe-graphical-game").start();
+     }
+     /** Read by the launcher every frame. */
+@@ -83,16 +80,16 @@ public class LauncherActivity extends StartupSdlActivity {
+         if(result!=RESULT_OK||data==null||data.getData()==null)return;
+         final Uri uri=data.getData();
+         final int region=pickRegion,bank=pickBank;
+-        busy=true;message=t("Copiando...","Copying...");
++        busy=true;message=t("Copiando...","Copying...","正在复制…");
+         new Thread(()->{
+             try {
+                 String msg;
+                 if(request==PICK_ROM)msg=importRom(uri);
+-                else if(request==PICK_SAVE){importSave(uri,region,bank);msg=t("Partida importada. Copia previa conservada si existía.","Save imported. The previous copy was kept if there was one.");}
+-                else if(request==PICK_EXPORT){exportSave(uri,region,bank);msg=t("Partida exportada.","Save exported.");}
++                else if(request==PICK_SAVE){importSave(uri,region,bank);msg=t("Partida importada. Copia previa conservada si existía.","Save imported. The previous copy was kept if there was one.","存档已导入，原有存档已备份。");}
++                else if(request==PICK_EXPORT){exportSave(uri,region,bank);msg=t("Partida exportada.","Save exported.","存档已导出。");}
+                 else msg=importHd(uri);
+                 finish(msg,false);
+-            }catch(Exception e){finish(t("No se pudo completar: ","Could not complete: ")+e.getMessage(),true);}
++            }catch(Exception e){finish(t("No se pudo completar: ","Could not complete: ","操作未完成：")+e.getMessage(),true);}
+         },"launcher-copy").start();
+     }
+     private static void copy(InputStream in,OutputStream out,long limit)throws Exception{
+@@ -108,8 +105,8 @@ public class LauncherActivity extends StartupSdlActivity {
+             catch(android.system.ErrnoException e){throw new IOException("Could not install the selected file",e);}
+         });
+         return result.kind==RomImport.Kind.HD_PACK?
+-            t("Mod HD copiado: se instala al abrir el juego.","HD mod copied: it installs when the game starts."):
+-            t("ROM instalada y verificada: ","ROM installed and verified: ")+result.code;
++            t("Mod HD copiado: se instala al abrir el juego.","HD mod copied: it installs when the game starts.","高清模组已复制，启动游戏时安装。"):
++            t("ROM instalada y verificada: ","ROM installed and verified: ","ROM 已安装并通过校验：")+result.code;
+     }
+     private void importSave(Uri uri,int selectedSaveRegion,int selectedBank)throws Exception{
+         File temp=File.createTempFile("save-",".tmp",getFilesDir());
+@@ -190,14 +187,14 @@ public class LauncherActivity extends StartupSdlActivity {
+         hdVariants(resolver,tree,root,files);
+         files.sort((a,b)->Boolean.compare(a[2].equals("active.txt"),b[2].equals("active.txt")));
+         total=0;for(String[] f:files)total+=Long.parseLong(f[3]);
+-        if(files.isEmpty())throw new IOException(t("no hay una carpeta hd con music, movies, scenes, subs o sprites dentro","there is no hd folder with music, movies, scenes, subs or sprites inside"));
++        if(files.isEmpty())throw new IOException(t("no hay una carpeta hd con music, movies, scenes, subs o sprites dentro","there is no hd folder with music, movies, scenes, subs or sprites inside","未找到包含音乐、影片、场景、字幕或图像的 hd 文件夹"));
+         int tracks=0,movies=0;
+         for(String[] f:files){
+             File dir=new File(getFilesDir(),"hd/"+f[1]);if(!dir.isDirectory()&&!dir.mkdirs())throw new IOException("hd/"+f[1]);
+             File target=new File(dir,f[2]);long size=Long.parseLong(f[3]);
+             boolean variant=f[1].startsWith("media/"),active=variant&&f[2].equals("active.txt");
+             if(f[2].endsWith(".ogg"))tracks++;else if(f[2].endsWith(".mp4"))movies++;
+-            progress(t("Copiando mod HD: ","Copying HD mod: ")+(copied>>20)+" / "+(total>>20)+" MB");
++            progress(t("Copiando mod HD: ","Copying HD mod: ","正在复制高清模组：")+(copied>>20)+" / "+(total>>20)+" MB");
+             copied+=size;
+             if(variant&&!active&&target.isFile()){
+                 if(target.length()!=size)throw new IOException("Immutable HD generation differs: "+f[2]);
+@@ -216,7 +213,7 @@ public class LauncherActivity extends StartupSdlActivity {
+                 }
+             }finally{if(temp.exists())temp.delete();}
+         }
+-        return t("Mod HD importado: ","HD mod imported: ")+tracks+t(" pistas, "," tracks, ")+movies+t(" videos. Se activa en las opciones del juego."," movies. It is turned on in the game's options.");
++        return t("Mod HD importado: ","HD mod imported: ","高清模组已导入：")+tracks+t(" pistas, "," tracks, "," 条音轨，")+movies+t(" videos. Se activa en las opciones del juego."," movies. It is turned on in the game's options."," 段影片。可在游戏设置中启用。");
+     }
+     private static String child(android.content.ContentResolver resolver,Uri tree,String parent,String wanted){
+         try(android.database.Cursor c=resolver.query(android.provider.DocumentsContract.buildChildDocumentsUriUsingTree(tree,parent),
+diff --git a/port/android/app/src/main/java/com/rekhcom/android/LauncherUiLanguage.java b/port/android/app/src/main/java/com/rekhcom/android/LauncherUiLanguage.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..2954491aeeb478ac5434a49d40944d548f295485
+--- /dev/null
++++ b/port/android/app/src/main/java/com/rekhcom/android/LauncherUiLanguage.java
+@@ -0,0 +1,32 @@
++package com.rekhcom.android;
++
++import java.io.BufferedReader;
++import java.io.File;
++import java.io.FileReader;
++import java.io.IOException;
++import java.util.Locale;
++
++final class LauncherUiLanguage {
++    private static final String[] IDS={"","es","en","fr","de","it","ja","zh"};
++
++    private LauncherUiLanguage(){}
++
++    static String selected(File files){
++        File config=new File(files,"decompui.ini");
++        if(config.isFile()&&config.length()<=65536){
++            try(BufferedReader reader=new BufferedReader(new FileReader(config))){
++                for(String line;(line=reader.readLine())!=null;){
++                    if(!line.startsWith("ui_language="))continue;
++                    int value=Integer.parseInt(line.substring(12));
++                    if(value>0&&value<IDS.length)return IDS[value];
++                }
++            }catch(IOException|NumberFormatException ignored){}
++        }
++        return Locale.getDefault().getLanguage();
++    }
++
++    static String text(String language,String es,String en,String zh){
++        if("zh".equals(language))return zh;
++        return "es".equals(language)?es:en;
++    }
++}
+diff --git a/port/android/app/src/main/java/com/rekhcom/android/LifecycleJournal.java b/port/android/app/src/main/java/com/rekhcom/android/LifecycleJournal.java
+index 676c1a7755ee26f7ddfb9882734f213c88666ea7..1a459169d1275f2e5402ba207618854990321a94 100644
+--- a/port/android/app/src/main/java/com/rekhcom/android/LifecycleJournal.java
++++ b/port/android/app/src/main/java/com/rekhcom/android/LifecycleJournal.java
+@@ -72,7 +72,10 @@ final class LifecycleJournal {
+         }catch(Throwable error){failed=true;}
+     }
+     static String summary(File directory){
+-        StringBuilder out=new StringBuilder("Lifecycle diagnostics (best effort; no game-state recovery):\n");
++        return summary(directory,false);
++    }
++    static String summary(File directory,boolean chinese){
++        StringBuilder out=new StringBuilder(chinese?"应用生命周期诊断：\n":"Lifecycle diagnostics (best effort; no game-state recovery):\n");
+         // Read fixed tails only, newest files first; no locks or waits for the writer.
+         for(int previous=0;previous<=5;previous++)for(String role:new String[]{"game","launcher"}){
+             File file=new File(directory,"lifecycle-"+role+".log"+(previous==0?"":"."+previous));
 diff --git a/port/android/app/src/main/java/com/rekhcom/android/RomImport.java b/port/android/app/src/main/java/com/rekhcom/android/RomImport.java
 index 0c479c1ee4dd848c59ace6f78008d9aedeb957b0..6c3c572906f7d8fefcc62426050dfa9f80b27c83 100644
 --- a/port/android/app/src/main/java/com/rekhcom/android/RomImport.java
@@ -117,11 +277,80 @@ index 0c479c1ee4dd848c59ace6f78008d9aedeb957b0..6c3c572906f7d8fefcc62426050dfa9f
              }
              replace.replace(pending,target);
              return result;
+diff --git a/port/android/app/src/main/java/com/rekhcom/android/StartupStageJournal.java b/port/android/app/src/main/java/com/rekhcom/android/StartupStageJournal.java
+index d92788a6ac972df870b73e9d04c6f6ebd5850344..188530b5ac3163588511e51f6d5059bcfddf5f89 100644
+--- a/port/android/app/src/main/java/com/rekhcom/android/StartupStageJournal.java
++++ b/port/android/app/src/main/java/com/rekhcom/android/StartupStageJournal.java
+@@ -44,7 +44,10 @@ final class StartupStageJournal {
+         try{writer.execute(()->append(directory,role,event));return true;}catch(RejectedExecutionException error){return false;}
+     }
+     static String summary(File directory){
+-        StringBuilder result=new StringBuilder("Startup boundaries (best effort; order seq per PID; return0 is not a device health certificate):\n");
++        return summary(directory,false);
++    }
++    static String summary(File directory,boolean chinese){
++        StringBuilder result=new StringBuilder(chinese?"启动阶段记录（按进程内序号排列）：\n":"Startup boundaries (best effort; order seq per PID; return0 is not a device health certificate):\n");
+         for(String role:new String[]{"safe","launcher","game"})for(String suffix:new String[]{"",".1"}){
+             File file=new File(directory,"startup-"+role+".log"+suffix);
+             if(!file.isFile()||file.length()>LIMIT)continue;
 diff --git a/port/android/diagnostics/StartupDiagnosticActivity.java b/port/android/diagnostics/StartupDiagnosticActivity.java
-index 90a3656383fce5ccc20c8d1d6bf0486687e30ffd..6c9ea6f0e1e9bcc1bc7d16bd80cedde2958c47a7 100644
+index 90a3656383fce5ccc20c8d1d6bf0486687e30ffd..b524f0b82a64e8f31aa93e35db3b58671b0e5140 100644
 --- a/port/android/diagnostics/StartupDiagnosticActivity.java
 +++ b/port/android/diagnostics/StartupDiagnosticActivity.java
-@@ -48,8 +48,8 @@ public final class StartupDiagnosticActivity extends Activity {
+@@ -5,7 +5,6 @@ import android.content.*;
+ import android.net.Uri;
+ import android.os.Bundle;
+ import android.widget.*;
+-import java.util.Locale;
+ import java.io.File;
+ 
+ /** Optional variant entry: no SDL inheritance, native calls or library loads. */
+@@ -19,26 +18,31 @@ public final class StartupDiagnosticActivity extends Activity {
+     private volatile boolean collecting,working;
+     private boolean childPending;
+     private boolean initialSelection=true;
+-    private boolean spanish;
+-    private String t(String es,String en){return spanish?es:en;}
++    private String language;
++    private String t(String es,String en,String zh){return LauncherUiLanguage.text(language,es,en,zh);}
+     @Override public void onCreate(Bundle state){
+-        super.onCreate(state);spanish="es".equals(Locale.getDefault().getLanguage());
++        super.onCreate(state);language=LauncherUiLanguage.selected(getFilesDir());
+         childPending=state!=null&&state.getBoolean("startup_child_pending",false);working=childPending;
+         LinearLayout layout=new LinearLayout(this);layout.setOrientation(LinearLayout.VERTICAL);layout.setPadding(24,24,24,24);
+-        TextView title=new TextView(this);title.setText(t("ReKHCoM · Arranque seguro de prueba","ReKHCoM · Safe startup test"));title.setTextSize(22);layout.addView(title);
+-        TextView help=new TextView(this);help.setText(t("Jugar inicia directamente el juego sin cargar el launcher gráfico. Puedes usar tu ROM ya instalada. Si vuelve a cerrarse, regresa aquí y comparte el informe. Esta prueba no garantiza corregir la causa en tu dispositivo.","Play starts the game directly without loading the graphical launcher. You can use your installed ROM. If it closes again, return here and share the report. This test does not establish a device-specific fix."));layout.addView(help);
+-        region=new Spinner(this);region.setAdapter(new ArrayAdapter<String>(this,android.R.layout.simple_spinner_dropdown_item,new String[]{"EU","US","JP"}));layout.addView(region);
+-        play=button(layout,t("Jugar con ROM instalada","Play installed ROM"),()->launch(false));
+-        pick=button(layout,t("Seleccionar ROM","Select ROM"),this::pickRom);
+-        open=button(layout,t("Launcher gráfico (opcional)","Graphical launcher (optional)"),()->launch(true));
+-        copy=button(layout,t("Copiar resumen","Copy summary"),()->{ClipboardManager c=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);if(c!=null)c.setPrimaryClip(ClipData.newPlainText("ReKHCoM startup",report.getText()));});
+-        share=button(layout,t("Compartir informe","Share report"),this::share);
+-        refresh=button(layout,t("Actualizar informe","Refresh report"),this::collect);
++        TextView title=new TextView(this);title.setText(t("ReKHCoM · Arranque seguro de prueba","ReKHCoM · Safe startup test","ReKHCoM · 安全启动"));title.setTextSize(22);layout.addView(title);
++        TextView help=new TextView(this);help.setText(t("Jugar inicia directamente el juego sin cargar el launcher gráfico. Puedes usar tu ROM ya instalada. Si vuelve a cerrarse, regresa aquí y comparte el informe. Esta prueba no garantiza corregir la causa en tu dispositivo.","Play starts the game directly without loading the graphical launcher. You can use your installed ROM. If it closes again, return here and share the report. This test does not establish a device-specific fix.","可用已安装的 ROM 直接进入游戏，也可以打开图形启动器。如果游戏再次退出，请回到这里分享诊断报告。"));layout.addView(help);
++        String[] labels={"zh".equals(language)?"欧洲版":"EU","zh".equals(language)?"美国版":"US","zh".equals(language)?"日本版":"JP"};
++        region=new Spinner(this);region.setAdapter(new ArrayAdapter<String>(this,android.R.layout.simple_spinner_dropdown_item,labels));layout.addView(region);
++        play=button(layout,t("Jugar con ROM instalada","Play installed ROM","启动已安装的 ROM"),()->launch(false));
++        pick=button(layout,t("Seleccionar ROM","Select ROM","选择 ROM"),this::pickRom);
++        open=button(layout,t("Launcher gráfico (opcional)","Graphical launcher (optional)","打开图形启动器"),()->launch(true));
++        copy=button(layout,t("Copiar resumen","Copy summary","复制诊断摘要"),()->{ClipboardManager c=(ClipboardManager)getSystemService(CLIPBOARD_SERVICE);if(c!=null)c.setPrimaryClip(ClipData.newPlainText("ReKHCoM",report.getText()));});
++        share=button(layout,t("Compartir informe","Share report","分享诊断报告"),this::share);
++        refresh=button(layout,t("Actualizar informe","Refresh report","刷新诊断报告"),this::collect);
+         report=new TextView(this);report.setTextIsSelectable(true);layout.addView(report);
+         ScrollView scroll=new ScrollView(this);scroll.addView(layout);setContentView(scroll);
+         collect();
+     }
+-    @Override protected void onResume(){super.onResume();if(report!=null)collect();}
++    @Override protected void onResume(){
++        super.onResume();
++        if(!language.equals(LauncherUiLanguage.selected(getFilesDir()))){recreate();return;}
++        if(report!=null)collect();
++    }
+     @Override protected void onSaveInstanceState(Bundle state){state.putBoolean("startup_child_pending",childPending);super.onSaveInstanceState(state);}
+     private void controls(){if(play!=null){play.setEnabled(!working&&!collecting);pick.setEnabled(!working&&!collecting);open.setEnabled(!working&&!collecting);}}
+     private void launch(boolean graphical){
+@@ -48,10 +52,10 @@ public final class StartupDiagnosticActivity extends Activity {
          final Context context=getApplicationContext();
          new Thread(()->{
              try {
@@ -130,8 +359,90 @@ index 90a3656383fce5ccc20c8d1d6bf0486687e30ffd..6c9ea6f0e1e9bcc1bc7d16bd80cedde2
 +                File rom=graphical?new File(context.getFilesDir(),"roms/"+CODES[selected]+".gba"):
 +                    RomImport.resolveInstalled(context.getFilesDir(),CODES[selected],null);
                  String role=graphical?"launcher":"game";
-                 if(!StartupProcessGate.awaitAbsent(context,role))throw new java.io.IOException(t("La ventana anterior todavía está cerrándose. Intenta de nuevo o comparte el informe.","The previous window is still closing. Try again or share the report."));
+-                if(!StartupProcessGate.awaitAbsent(context,role))throw new java.io.IOException(t("La ventana anterior todavía está cerrándose. Intenta de nuevo o comparte el informe.","The previous window is still closing. Try again or share the report."));
++                if(!StartupProcessGate.awaitAbsent(context,role))throw new java.io.IOException(t("La ventana anterior todavía está cerrándose. Intenta de nuevo o comparte el informe.","The previous window is still closing. Try again or share the report.","上一个窗口仍在关闭，请稍后重试或分享诊断报告。"));
                  StartupStageJournal.record(context.getFilesDir(),"safe",attempt,android.os.Process.myPid(),graphical?"launcher_requested":"game_requested",selected);
+                 runOnUiThread(()->{
+                     if(isFinishing()||isDestroyed())return;
+@@ -64,7 +68,7 @@ public final class StartupDiagnosticActivity extends Activity {
+             }catch(Exception error){runOnUiThread(()->{working=false;if(isFinishing()||isDestroyed())return;controls();showFailure(error);});}
+         },"safe-startup-prepare").start();
+     }
+-    private void showFailure(Exception error){Toast.makeText(this,t("No se pudo iniciar: ","Could not start: ")+error.getMessage(),Toast.LENGTH_LONG).show();}
++    private void showFailure(Exception error){Toast.makeText(this,t("No se pudo iniciar: ","Could not start: ","操作未完成：")+error.getMessage(),Toast.LENGTH_LONG).show();}
+     private void pickRom(){
+         if(working||collecting)return;
+         Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("*/*").addCategory(Intent.CATEGORY_OPENABLE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+@@ -82,7 +86,7 @@ public final class StartupDiagnosticActivity extends Activity {
+                     catch(android.system.ErrnoException error){throw new java.io.IOException("Atomic import failed",error);}
+                 });
+                 StartupStageJournal.record(context.getFilesDir(),"safe",nonce,android.os.Process.myPid(),"rom_import",imported.kind==RomImport.Kind.ROM?1:0);
+-                runOnUiThread(()->{working=false;if(isFinishing()||isDestroyed())return;for(int n=0;n<CODES.length;n++)if(CODES[n].equals(imported.code))region.setSelection(n);controls();Toast.makeText(this,t("Importación verificada.","Import verified."),Toast.LENGTH_LONG).show();collect();});
++                runOnUiThread(()->{working=false;if(isFinishing()||isDestroyed())return;for(int n=0;n<CODES.length;n++)if(CODES[n].equals(imported.code))region.setSelection(n);controls();Toast.makeText(this,t("Importación verificada.","Import verified.","已导入并通过校验。"),Toast.LENGTH_LONG).show();collect();});
+             }catch(Exception error){runOnUiThread(()->{working=false;if(isFinishing()||isDestroyed())return;controls();showFailure(error);});}
+         },"safe-rom-import").start();
+     }
+@@ -97,19 +101,24 @@ public final class StartupDiagnosticActivity extends Activity {
+                     if(isFinishing()||isDestroyed())return;share.setEnabled(true);
+                     Intent intent=new Intent(Intent.ACTION_SEND).setType("application/zip").putExtra(Intent.EXTRA_STREAM,uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                     intent.setClipData(ClipData.newUri(getContentResolver(),"ReKHCoM startup report",uri));
+-                    try{startActivity(Intent.createChooser(intent,t("Compartir informe","Share report")));}catch(ActivityNotFoundException e){Toast.makeText(this,t("No hay una app para compartir. Puedes copiar el resumen.","No sharing app available. You can copy the summary."),Toast.LENGTH_LONG).show();}
++                    try{startActivity(Intent.createChooser(intent,t("Compartir informe","Share report","分享诊断报告")));}catch(ActivityNotFoundException e){Toast.makeText(this,t("No hay una app para compartir. Puedes copiar el resumen.","No sharing app available. You can copy the summary.","没有可用的分享应用，可以复制诊断摘要。"),Toast.LENGTH_LONG).show();}
+                 });
+-            }catch(Exception e){runOnUiThread(()->{if(isFinishing()||isDestroyed())return;share.setEnabled(true);Toast.makeText(this,t("No se pudo compartir: ","Could not share: ")+e.getMessage(),Toast.LENGTH_LONG).show();});}
++            }catch(Exception e){runOnUiThread(()->{if(isFinishing()||isDestroyed())return;share.setEnabled(true);Toast.makeText(this,t("No se pudo compartir: ","Could not share: ","无法分享：")+e.getMessage(),Toast.LENGTH_LONG).show();});}
+         },"startup-share-snapshot").start();
+     }
+     private void collect(){
+-        if(collecting)return;collecting=true;controls();copy.setEnabled(false);share.setEnabled(false);refresh.setEnabled(false);report.setText(t("Leyendo información de cierre de esta app…","Reading this app's exit information…"));
++        if(collecting)return;collecting=true;controls();copy.setEnabled(false);share.setEnabled(false);refresh.setEnabled(false);report.setText(t("Leyendo información de cierre de esta app…","Reading this app's exit information…","正在读取应用退出记录…"));
+         final Context context=getApplicationContext();
+         new Thread(()->{
+             String result;boolean ok;
+             int first=-1,count=0;
+-            for(int n=0;n<CODES.length;n++){File rom=new File(context.getFilesDir(),"roms/"+CODES[n]+".gba");if(rom.isFile()&&rom.length()==33554432){first=n;count++;}}
+-            try{StartupStageJournal.record(context.getFilesDir(),"safe",nonce,android.os.Process.myPid(),"java_entry",0);result=StartupExitCollector.collect(context);ok=true;}catch(Exception e){result=t("No se pudo crear el informe (el previo se conserva): ","Could not create report (previous report retained): ")+e;ok=StartupExitCollector.report(context).isFile();}
++            File directory=new File(context.getFilesDir(),"roms");
++            File patched=new File(directory,"B8CJ-zh.gba");
++            for(int n=0;n<CODES.length;n++){
++                File rom=new File(directory,CODES[n]+".gba");
++                if((rom.isFile()&&rom.length()==33554432)||("B8CJ".equals(CODES[n])&&patched.isFile()&&patched.length()==33554432)){first=n;count++;}
++            }
++            try{StartupStageJournal.record(context.getFilesDir(),"safe",nonce,android.os.Process.myPid(),"java_entry",0);result=StartupExitCollector.collect(context,"zh".equals(language));ok=true;}catch(Exception e){result=t("No se pudo crear el informe (el previo se conserva): ","Could not create report (previous report retained): ","无法生成诊断报告，已保留旧报告：")+e;ok=StartupExitCollector.report(context).isFile();}
+             final String text=result;final boolean ready=ok;
+             final int installed=first,installedCount=count;
+             runOnUiThread(()->{collecting=false;if(isFinishing()||isDestroyed())return;if(initialSelection&&installedCount==1)region.setSelection(installed);initialSelection=false;controls();report.setText(text);copy.setEnabled(true);share.setEnabled(ready);refresh.setEnabled(true);});
+diff --git a/port/android/diagnostics/StartupExitCollector.java b/port/android/diagnostics/StartupExitCollector.java
+index fb7badc08bf9cbec67ff99059192072261b7669e..6b5647a285ba2b2b9f3b9ec9577670602c22d8b0 100644
+--- a/port/android/diagnostics/StartupExitCollector.java
++++ b/port/android/diagnostics/StartupExitCollector.java
+@@ -14,18 +14,18 @@ final class StartupExitCollector {
+     static File report(Context context){return new File(new File(context.getCacheDir(),"startup-diagnostics"),"report.zip");}
+     static File sharedDirectory(Context context){return new File(report(context).getParentFile(),"shared");}
+     static synchronized File shareSnapshot(Context context)throws IOException {return ReportSnapshots.create(report(context),sharedDirectory(context));}
+-    static synchronized String collect(Context context)throws IOException {
++    static synchronized String collect(Context context,boolean chinese)throws IOException {
+         File directory=report(context).getParentFile();
+         if(!directory.isDirectory()&&!directory.mkdirs())throw new IOException("Cannot create report folder");
+         ReportSnapshots.preservePrior(report(context));
+-        StringBuilder text=new StringBuilder("ReKHCoM optional safe startup test (device root cause not established)\n");
+-        try{android.content.pm.PackageInfo info=context.getPackageManager().getPackageInfo(context.getPackageName(),0);text.append("Current build: ").append(info.versionName).append(" code=").append(info.versionCode).append('\n');}catch(Exception error){text.append("Build identity unavailable\n");}
++        StringBuilder text=new StringBuilder(chinese?"ReKHCoM 安全启动诊断\n":"ReKHCoM optional safe startup test (device root cause not established)\n");
++        try{android.content.pm.PackageInfo info=context.getPackageManager().getPackageInfo(context.getPackageName(),0);text.append(chinese?"当前版本：":"Current build: ").append(info.versionName).append(" code=").append(info.versionCode).append('\n');}catch(Exception error){text.append(chinese?"无法读取版本信息。\n":"Build identity unavailable\n");}
+         try(InputStream input=context.getAssets().open("startup-build.txt")){ByteArrayOutputStream bytes=new ByteArrayOutputStream();ReportLimits.copy(input,bytes,4096);text.append(new String(bytes.toByteArray(),StandardCharsets.UTF_8)).append('\n');}catch(IOException ignored){}
+-        text.append("Model: ").append(ReportLimits.text(Build.MANUFACTURER+" "+Build.MODEL,200)).append("\nAndroid API: ").append(Build.VERSION.SDK_INT).append('\n');
+-        text.append("Only this app's exit records. Exit reason is not a verified root cause. Updates/force-stop may add unrelated exit records.\n");
+-        text.append("An Activity/native return can finish with no process-exit record. Safe-entry retirement of its own terminated SDL process is intentional; correlate nonce/PID/stages.\n");
+-        text.append(StartupStageJournal.summary(context.getFilesDir())).append('\n');
+-        text.append(LifecycleJournal.summary(context.getFilesDir())).append('\n');
++        text.append(chinese?"设备型号：":"Model: ").append(ReportLimits.text(Build.MANUFACTURER+" "+Build.MODEL,200)).append(chinese?"\n安卓 API：":"\nAndroid API: ").append(Build.VERSION.SDK_INT).append('\n');
++        text.append(chinese?"报告仅包含本应用的退出记录。更新或强制停止也可能产生退出记录。\n":"Only this app's exit records. Exit reason is not a verified root cause. Updates/force-stop may add unrelated exit records.\n");
++        text.append(chinese?"可通过 nonce、PID 和阶段记录定位启动过程。部分退出没有进程记录。\n":"An Activity/native return can finish with no process-exit record. Safe-entry retirement of its own terminated SDL process is intentional; correlate nonce/PID/stages.\n");
++        text.append(StartupStageJournal.summary(context.getFilesDir(),chinese)).append('\n');
++        text.append(LifecycleJournal.summary(context.getFilesDir(),chinese)).append('\n');
+         LinkedHashMap<String,byte[]> ownLogs=new LinkedHashMap<>();
+         for(String name:new String[]{"launcher-startup-error.log","kh_com_host.log","kh_com.log"}){
+             File file=new File(context.getFilesDir(),name);int limit=name.startsWith("launcher-")?1024:28000;
 diff --git a/port/configure_pc.py b/port/configure_pc.py
 index 4ea8db4b1340b39c11b6819e5d375b041a4834cc..1ca74b51d38a2bbe3fee87a9a7599cb6b72ea5b3 100644
 --- a/port/configure_pc.py
@@ -190,10 +501,21 @@ index 4ea8db4b1340b39c11b6819e5d375b041a4834cc..1ca74b51d38a2bbe3fee87a9a7599cb6
          objs.append("$builddir/port/core_assets_rc.o")
          n.newline()
 diff --git a/port/decompui/decompui.cpp b/port/decompui/decompui.cpp
-index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353fc4424f39 100644
+index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0fd17f997a3f2d2d457e2b8d1a871b88ab12482a 100644
 --- a/port/decompui/decompui.cpp
 +++ b/port/decompui/decompui.cpp
-@@ -122,7 +122,7 @@ static bool sSpanish;
+@@ -54,6 +54,10 @@
+ #include "netlink_preset.h"
+ #include "../include/port/port_hd_media.h"
+ #include "imgui.h"
++#ifdef REKHCOM_BUNDLED_ANDROID_FONT
++#include "launcher_font_bundle.h"
++#include "zh_launcher_font.inc"
++#endif
+ #include "backends/imgui_impl_opengl3.h"
+ #include "backends/imgui_impl_sdl3.h"
+ 
+@@ -122,7 +126,7 @@ static bool sSpanish;
  /* The launcher in the game's languages (the user, 24/10): Spanish and English in the code, French, German, Italian
     and Japanese from i18n_table.inc, keyed by the English text; a text not translated yet stays in English. */
  #include "i18n_table.inc"
@@ -202,7 +524,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
  static std::unordered_map<std::string, const char*> sUiTable;   /* English text -> this language's */
  static std::unordered_map<const char*, const char*> sUiSeen;    /* the same by address, once looked up */
  
-@@ -146,19 +146,28 @@ struct Version {
+@@ -146,19 +150,28 @@ struct Version {
      const char* id;
      const char* code;
      const char* sha1;
@@ -235,7 +557,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
  struct VersionState {
      bool installed;
      fs::path exe;
-@@ -166,6 +175,9 @@ struct VersionState {
+@@ -166,6 +179,9 @@ struct VersionState {
  
  static fs::path sRoot;
  static VersionState sState[kVersionCount];
@@ -245,7 +567,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
  static int sSelected;
  static void KeepSelection(); /* the version chosen: European first, then the last chosen */
  static std::string sNotice;
-@@ -262,8 +274,27 @@ static bool ReadFile(const fs::path& path, std::vector<unsigned char>& out, size
+@@ -262,8 +278,27 @@ static bool ReadFile(const fs::path& path, std::vector<unsigned char>& out, size
      return (bool)f;
  }
  
@@ -275,7 +597,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
  }
  
  /* The player's own files in an install: saves (every bank and version), settings, the RetroAchievements login and the
-@@ -346,8 +377,7 @@ static void ScanInstall() {
+@@ -346,8 +381,7 @@ static void ScanInstall() {
      static const char* const devDirs[] = { "pc", "pc-us", "pc-jp" };
  
      for (int v = 0; v < kVersionCount; v++) {
@@ -285,7 +607,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          /* the game executables live in bin/, so the launcher is the only one at the root */
          sState[v].exe = sRoot / "bin" / (std::string("khcom_") + kVersions[v].id + ".exe");
          if (!fs::exists(sState[v].exe))
-@@ -359,6 +389,9 @@ static void ScanInstall() {
+@@ -359,6 +393,9 @@ static void ScanInstall() {
                  sState[v].exe = dev;
          }
      }
@@ -295,7 +617,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
  }
  
  /* The game for version v can start: its dump, and its program (the Android app carries the game in its libraries) */
-@@ -382,8 +415,10 @@ static void InstallRom(const fs::path& path) {
+@@ -382,8 +419,10 @@ static void InstallRom(const fs::path& path) {
      for (int v = 0; v < kVersionCount; v++) {
          if (std::memcmp(rom.data() + 0xAC, kVersions[v].code, 4) != 0)
              continue;
@@ -308,7 +630,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
                         T(" no coincide con el volcado original (SHA-1 distinto).",
                           " ROM does not match the original dump (different SHA-1)."),
                     true);
-@@ -391,7 +426,8 @@ static void InstallRom(const fs::path& path) {
+@@ -391,7 +430,8 @@ static void InstallRom(const fs::path& path) {
          }
          std::error_code ec;
          fs::create_directories(sRoot / "roms", ec);
@@ -318,7 +640,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          tmp += ".tmp";
          {
              std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-@@ -401,15 +437,15 @@ static void InstallRom(const fs::path& path) {
+@@ -401,15 +441,15 @@ static void InstallRom(const fs::path& path) {
                  return;
              }
          }
@@ -337,7 +659,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
                 false);
          return;
      }
-@@ -640,11 +676,11 @@ static void SaveIni() {
+@@ -640,11 +680,11 @@ static void SaveIni() {
  static const char* const kGameLanguageIds[] = { "", "en", "fr", "de", "it", "es" };
  /* The launcher's languages: 1 Spanish, 2 English, then the European cartridge's other three and Japanese; 0 until
     chosen. ids[] as kh_com's and the flags' (LanguageFlag). */
@@ -353,7 +675,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
  static int sUiLanguage;
  
  static void ApplyUiLanguage() {
-@@ -658,6 +694,7 @@ static void ApplyUiLanguage() {
+@@ -658,6 +698,7 @@ static void ApplyUiLanguage() {
              case LANG_GERMAN: system = "de"; break;
              case LANG_ITALIAN: system = "it"; break;
              case LANG_JAPANESE: system = "ja"; break;
@@ -361,7 +683,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          }
  #else
          int count = 0;
-@@ -700,6 +737,8 @@ static void LoadLauncherState() {
+@@ -700,6 +741,8 @@ static void LoadLauncherState() {
              s64FailedVersion = line.substr(14);
          } else if (line == "hd_offer=0") {
              sHdOfferDeclined = true;
@@ -370,7 +692,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          } else if (line.rfind("version=", 0) == 0) {
              for (int v = 0; v < kVersionCount; v++)
                  if (line.substr(8) == kVersions[v].id)
-@@ -734,12 +773,14 @@ static void SaveLauncherState() {
+@@ -734,12 +777,14 @@ static void SaveLauncherState() {
      f << "runtime_mode=" << sRuntimeMode << "\n";
      f << "version=" << kVersions[sSelected].id << "\n";
      f << "ui_language=" << sUiLanguage << "\n";
@@ -385,7 +707,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          {"hd_offer", sHdOfferDeclined ? "0" : ""}, {"auto64_failed", s64FailedVersion},
          {"force_32", ""}, {"game_language", ""}});
  #endif
-@@ -1093,12 +1134,48 @@ static void LoadFonts() {
+@@ -1093,12 +1138,48 @@ static void LoadFonts() {
      if (sFontBody == nullptr) {
          ImFontConfig def;
          def.SizePixels = Px(16);
@@ -435,7 +757,39 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
  }
  
  /* AddFont returns an unbuilt object: a later merge can make Build fail while
-@@ -1509,7 +1586,7 @@ static bool HeaderChip(const char* id, const char* label, const char* flag, ImVe
+@@ -1106,6 +1187,23 @@ static void LoadFonts() {
+ static bool FinalizeFonts() {
+     ImGuiIO& io = ImGui::GetIO();
+     ImFontAtlas* atlas = io.Fonts;
++#ifdef REKHCOM_BUNDLED_ANDROID_FONT
++    GLint maxTextureSize = 0;
++    glGetIntegerv(GL_MAX_TEXTURE_SIZE, &maxTextureSize);
++    LauncherFontRoles bundled;
++    io.FontDefault = nullptr;
++    if (!BuildLauncherFontBundle(*atlas, kLauncherFontBytes, sizeof(kLauncherFontBytes),
++                                 kLauncherFontRanges, sScale, maxTextureSize, bundled)) {
++        SDL_SetError("Bundled launcher font atlas is missing glyphs or exceeds GPU texture limits");
++        return false;
++    }
++    sFontBody = sFontMenu = bundled.body;
++    sFontSmall = sFontMenuSmall = bundled.small;
++    sFontTitle = bundled.title;
++    io.FontDefault = sFontBody;
++    SDL_Log("launcher bundled font atlas ready: %dx%d", atlas->TexWidth, atlas->TexHeight);
++    return true;
++#else
+     auto usable = [&]() {
+         if (!atlas->IsBuilt() || atlas->TexWidth <= 0 || atlas->TexHeight <= 0)
+             return false;
+@@ -1142,6 +1240,7 @@ static bool FinalizeFonts() {
+     }
+     fprintf(stderr, "launcher font atlas: incorporated default ready (custom lettering may be unavailable)\n");
+     return true;
++#endif
+ }
+ 
+ /* ---- widgets ----------------------------------------------------------------- */
+@@ -1509,7 +1608,7 @@ static bool HeaderChip(const char* id, const char* label, const char* flag, ImVe
      return clicked;
  }
  
@@ -444,7 +798,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
  static void LauncherLanguagePicker(ImVec2 size) {
      if (HeaderChip("##uilang", kUiLanguageNames[sUiLanguage], kUiLanguageFlags[sUiLanguage], size, true) ||
          (sPage == PAGE_HOME && SDL_getenv("DECOMPUI_LANG_LIST"))) /* harness: the list open on Home's shot */
-@@ -1639,7 +1716,7 @@ static void PageHome(SDL_Window* window) {
+@@ -1639,7 +1738,7 @@ static void PageHome(SDL_Window* window) {
          /* region, code and languages */
          float tx = rowMin.x + Px(44);
          dl->AddText(sFontMenu, sFontMenu->FontSize, ImVec2(tx, rowMin.y + Px(4)), ImGui::GetColorU32(kText),
@@ -453,7 +807,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          {
              /* the code, then each language with its flag */
              float fs = sFontSmall->FontSize, y = rowMin.y + Px(28), x = tx;
-@@ -1680,6 +1757,14 @@ static void PageHome(SDL_Window* window) {
+@@ -1680,6 +1779,14 @@ static void PageHome(SDL_Window* window) {
          dl->AddText(sFontSmall, sFontSmall->FontSize, sp, ImGui::GetColorU32(color), status);
          ImGui::PopID();
      }
@@ -468,7 +822,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
      if (sSelected == 0) {
          /* the European cartridge's language: chosen here, the game starts in it
             and skips its language screen (game_language, shared with kh_com.ini) */
-@@ -1718,9 +1803,9 @@ static void PageHome(SDL_Window* window) {
+@@ -1718,9 +1825,9 @@ static void PageHome(SDL_Window* window) {
              if (HomeFeatureRow(T("Undub (voces japonesas)", "Undub (Japanese voices)"),
                                 T("Las voces japonesas originales con los textos de tu versión. Necesita la ROM japonesa.",
                                   "The original Japanese voices with your version's text. Needs the Japanese ROM."),
@@ -480,7 +834,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
                      SaveIni();
                  else
                      PickRom(window);
-@@ -2155,7 +2240,7 @@ static void PageSound() {
+@@ -2155,7 +2262,7 @@ static void PageSound() {
      NextCard("voices", T("VOCES Y HD", "VOICES AND HD"));
      changed |= GatedToggle(T("Undub (voces japonesas)", "Undub (Japanese voices)"),
                           T("Requiere la ROM japonesa original verificada en roms/B8CJ.gba. Se aplica al iniciar el juego; conserva los textos europeos o ingleses.",
@@ -489,7 +843,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
      
      ImGui::Separator();
      ImGui::PushStyleColor(ImGuiCol_TextLink, kAccent);
-@@ -2974,7 +3059,7 @@ static void CreateDesktopShortcut() {
+@@ -2974,7 +3081,7 @@ static void CreateDesktopShortcut() {
      HRESULT com = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
      IShellLinkW* shell = nullptr;
      if (SUCCEEDED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER, IID_IShellLinkW, (void**)&shell))) {
@@ -498,7 +852,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          IPersistFile* file = nullptr;
          shell->SetPath(st.exe.wstring().c_str());
          shell->SetArguments(args.c_str());
-@@ -3297,7 +3382,7 @@ static void AddToSteam() {
+@@ -3297,7 +3404,7 @@ static void AddToSteam() {
          return;
      }
      std::string exe = "\"" + st.exe.u8string() + "\"", dir = "\"" + sRoot.u8string() + "\"";
@@ -507,7 +861,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
      std::string name = "ReKHCoM";
      uint32_t appid = Crc32(exe + name) | 0x80000000u;
      int done = 0;
-@@ -3402,7 +3487,8 @@ static fs::path PickInstallFolder() {
+@@ -3402,7 +3509,8 @@ static fs::path PickInstallFolder() {
      DWORD options = 0;
      dialog->GetOptions(&options);
      dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
@@ -517,7 +871,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
      std::error_code ec;
      for (wchar_t d = L'D'; d <= L'Z'; d++) {
          std::wstring games = std::wstring(1, d) + L":\\Games";
-@@ -3581,7 +3667,7 @@ static void Launch(SDL_Window* window) {
+@@ -3581,7 +3689,7 @@ static void Launch(SDL_Window* window) {
      (void)window;
      SaveIni();
      SaveLauncherState();
@@ -526,7 +880,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          Notice(T("No se pudo iniciar el juego.", "Could not start the game."), true);
      return;
  #else
-@@ -3623,7 +3709,7 @@ static void Launch(SDL_Window* window) {
+@@ -3623,7 +3731,7 @@ static void Launch(SDL_Window* window) {
              cmd += L" " + Quote(guest.wstring()) + L" --data " + Quote(sRoot.wstring()) +
                     L" --boot-status " + Quote(boot.wstring());
          } else {
@@ -535,7 +889,7 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          }
          STARTUPINFOW si = {};
          PROCESS_INFORMATION pi = {};
-@@ -3632,7 +3718,7 @@ static void Launch(SDL_Window* window) {
+@@ -3632,7 +3740,7 @@ static void Launch(SDL_Window* window) {
          const wchar_t* old = _wgetenv(L"KHCOM_ROM");
          const bool hadRom = old != nullptr;
          std::wstring oldRom = old ? old : L"";
@@ -544,6 +898,16 @@ index f527261a143cdaee16a63de1d5b7a2bf23ff1dc7..0e5d678c8f9f58fb3fd9e007fcb5353f
          BOOL created = CreateProcessW(exe.c_str(), cmd.data(), nullptr, nullptr, FALSE, 0, nullptr,
                                        sRoot.c_str(), &si, &pi);
          SetEnvironmentVariableW(L"KHCOM_ROM", hadRom ? oldRom.c_str() : nullptr);
+@@ -4036,7 +4144,9 @@ int main(int argc, char** argv) {
+     io.IniFilename = nullptr;
+     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
+     ApplyStyle();
++#ifndef REKHCOM_BUNDLED_ANDROID_FONT
+     LoadFonts();
++#endif
+     if (!FinalizeFonts())
+         return LauncherVideoFailed("Font atlas initialization", window, gl);
+     SDL_ClearError();
 diff --git a/port/decompui/i18n/zh.json b/port/decompui/i18n/zh.json
 new file mode 100644
 index 0000000000000000000000000000000000000000..f6074c3b0e5e0c7d71ac347c093f493afa08f7db
@@ -1018,6 +1382,68 @@ index 0000000000000000000000000000000000000000..f6074c3b0e5e0c7d71ac347c093f493a
 + "tracks": "音轨",
 + "unknown language": "未知语言"
 +}
+diff --git a/port/decompui/launcher_font_bundle.h b/port/decompui/launcher_font_bundle.h
+new file mode 100644
+index 0000000000000000000000000000000000000000..e723372d25d01235be5f2dff15e0ac4425827da5
+--- /dev/null
++++ b/port/decompui/launcher_font_bundle.h
+@@ -0,0 +1,56 @@
++#pragma once
++
++#include "imgui.h"
++#include <algorithm>
++#include <cmath>
++#include <cstddef>
++
++struct LauncherFontRoles {
++    ImFont* body = nullptr;
++    ImFont* small = nullptr;
++    ImFont* title = nullptr;
++};
++
++// Test the actual atlas glyphs, including after a low-DPI retry on a small GPU.
++inline bool BuildLauncherFontBundle(ImFontAtlas& atlas, const unsigned char* font, int fontSize,
++                                    const ImWchar* ranges, float scale, int textureLimit,
++                                    LauncherFontRoles& roles) {
++    if (!font || fontSize <= 0 || !ranges || !ranges[0] || textureLimit <= 0)
++        return false;
++
++    ImFontConfig config;
++    config.FontDataOwnedByAtlas = false;
++    config.OversampleH = 1;
++    config.OversampleV = 1;
++    const float preferred = std::isfinite(scale) ? std::clamp(scale, 1.0f, 3.0f) : 1.0f;
++    atlas.TexDesiredWidth = std::min(textureLimit, 2048);
++    for (const float effective : {preferred, std::min(preferred, 1.75f), 1.0f}) {
++        atlas.Clear();
++        auto add = [&](float size) {
++            return atlas.AddFontFromMemoryTTF(const_cast<unsigned char*>(font), fontSize,
++                                              std::round(size * effective), &config, ranges);
++        };
++        roles = {add(18), add(14), add(34)};
++        if (!atlas.Build() || atlas.TexHeight > textureLimit || atlas.TexWidth > textureLimit)
++            continue;
++        bool complete = true;
++        for (ImFont* role : {roles.body, roles.small, roles.title}) {
++            if (!role || !role->IsLoaded()) {
++                complete = false;
++                break;
++            }
++            for (const ImWchar* range = ranges; *range && complete; range += 2)
++                for (unsigned int cp = range[0]; cp <= range[1]; ++cp)
++                    if (!role->FindGlyphNoFallback(static_cast<ImWchar>(cp))) {
++                        complete = false;
++                        break;
++                    }
++        }
++        if (complete)
++            return true;
++    }
++    atlas.Clear();
++    atlas.TexDesiredWidth = 0;
++    roles = {};
++    return false;
++}
 diff --git a/port/decompui/rom_folder.inc b/port/decompui/rom_folder.inc
 index eca25c99a26383473967a4e9f40cfc8add1b6c46..496eca424ba77ff2715d3521901cc852823d38dc 100644
 --- a/port/decompui/rom_folder.inc
@@ -1170,7 +1596,7 @@ index 4e4298ec9bd2fd4c00bc2eb99323062be552fabe..6dd726171710d68dc66952595879d6ce
          cells = [c_literal(r['en'])]
          for lang in LANGS:
 diff --git a/port/tools/test_android_safe_startup_launch.py b/port/tools/test_android_safe_startup_launch.py
-index d33c8ad302ecefc0acceaa490f26a5c7ca518ca6..8fef10d0f8b368ace8166ed7c8ba2c7551df9f0f 100644
+index d33c8ad302ecefc0acceaa490f26a5c7ca518ca6..265f59cf3cb8eeac7ca62395ddaf0fd181207e01 100644
 --- a/port/tools/test_android_safe_startup_launch.py
 +++ b/port/tools/test_android_safe_startup_launch.py
 @@ -1,9 +1,11 @@
@@ -1196,6 +1622,15 @@ index d33c8ad302ecefc0acceaa490f26a5c7ca518ca6..8fef10d0f8b368ace8166ed7c8ba2c75
   static class StartupProcessGate{static boolean awaitAbsent(Context c,String role){return true;}}
   static class StartupStageJournal{static void record(File f,String r,String n,int p,String stage,int code){}}
   static class Thread{Runnable task;Thread(Runnable r,String n){task=r;}void start(){task.run();}}
+@@ -35,7 +37,7 @@ class LaunchFixture{
+  Context getApplicationContext(){return new Context();}String getPackageName(){return "com.rekhcom.android";}
+  File getFilesDir(){return new File("fixture");}Intent getIntent(){return new Intent();}void progress(String s){}void finish(String s,boolean e){busy=false;}
+  void controls(){}void collect(){}boolean isFinishing(){return false;}boolean isDestroyed(){return false;}
+- String t(String es,String en){return en;}void showFailure(Exception e){throw new AssertionError(e);}
++ String t(String es,String en,String zh){return en;}void showFailure(Exception e){throw new AssertionError(e);}
+  void runOnUiThread(Runnable r){ui.add(r);}void startActivityForResult(Intent i,int request){starts++;}void startActivity(Intent i){starts++;}
+  LAUNCH
+  void result(int request){RESULT}
 @@ -64,8 +66,9 @@ with tempfile.TemporaryDirectory(prefix='startup-launch-') as directory:
          native=block('public void nativeLaunch(',graphical)+'\n'+block('private void safeLaunchGame(',graphical)
          native_result=block('if(request==SAFE_GAME)',graphical)

@@ -2,6 +2,7 @@
 
 import argparse
 import hashlib
+import os
 import re
 import shutil
 import sys
@@ -53,6 +54,9 @@ def android(args):
     version_header = (root / "port/include/port/port_version.h").read_text(encoding="utf-8")
     source_version = re.search(r'#define REKHCOM_VERSION\s+"([^"]+)"', version_header)[1]
     identity = package_identity(source_version)
+    hotfix = os.environ.get("ANDROID_HOTFIX") == "true"
+    version_code = identity["version_code"] + int(hotfix)
+    version_name = f"{source_version}[ZH]" + (".1" if hotfix else "")
     identity["application_id"] = "com.rekhcom.android.zh"
     stage, sdl = args.output.resolve(), args.sdl.resolve()
     shutil.copytree(root / "port/android/app", stage / "app")
@@ -93,8 +97,8 @@ android {{
         applicationId '{identity["application_id"]}'
         minSdk 21
         targetSdk 35
-        versionCode {identity["version_code"]}
-        versionName '{source_version}[ZH]'
+        versionCode {version_code}
+        versionName '{version_name}'
     }}
     compileOptions {{
         sourceCompatibility JavaVersion.VERSION_1_8

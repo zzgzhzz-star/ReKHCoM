@@ -8,6 +8,10 @@ on:
       upstream_tag:
         description: 'Optional upstream tag. Leave empty for the latest stable release.'
         type: string
+      android_hotfix:
+        description: 'Publish Android hotfix .1 for the explicitly selected upstream release.'
+        type: boolean
+        default: false
   push:
     branches: [main, codex/zh-release-sync]
     paths: ['.github/workflows/zh-release-sync.yml', 'zh/**']
@@ -27,6 +31,7 @@ jobs:
       needed: ${{ steps.release.outputs.needed }}
       tag: ${{ steps.release.outputs.tag }}
       target: ${{ steps.release.outputs.target }}
+      hotfix: ${{ steps.release.outputs.hotfix }}
       windows_url: ${{ steps.release.outputs.windows_url }}
       windows_sha: ${{ steps.release.outputs.windows_sha }}
       android_url: ${{ steps.release.outputs.android_url }}
@@ -39,6 +44,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           REQUESTED_TAG: ${{ inputs.upstream_tag }}
+          REQUEST_ANDROID_HOTFIX: ${{ inputs.android_hotfix }}
         run: python zh/releases.py discover
 
   build:
@@ -56,6 +62,7 @@ jobs:
     timeout-minutes: 40
     env:
       UPSTREAM_TAG: ${{ needs.discover.outputs.tag }}
+      ANDROID_HOTFIX: ${{ needs.discover.outputs.hotfix }}
       ASSET_URL: ${{ needs.discover.outputs[format('{0}_url', matrix.platform)] }}
       ASSET_SHA256: ${{ needs.discover.outputs[format('{0}_sha', matrix.platform)] }}
     defaults:
@@ -69,6 +76,7 @@ jobs:
         with:
           python-version: '3.12'
       - name: Apply localization to the upstream source tag
+        if: matrix.platform == 'android' || env.ANDROID_HOTFIX != 'true'
         run: |
           git init -q source
           git -C source config core.autocrlf false
@@ -83,16 +91,26 @@ jobs:
           (cd source && python port/tools/launcher_strings.py --emit)
           python zh/prepare.py source
       - name: Build the Simplified Chinese font subset
+        if: matrix.platform == 'android' || env.ANDROID_HOTFIX != 'true'
         run: |
           python -m pip install fonttools==4.55.3
           upstream='https://raw.githubusercontent.com/google/fonts/main/ofl/notosanssc'
           curl -fL --retry 3 "$upstream/NotoSansSC%5Bwght%5D.ttf" -o font/upstream.ttf
           curl -fL --retry 3 "$upstream/OFL.txt" -o font/OFL.txt
           python -m fontTools.varLib.instancer font/upstream.ttf wght=400 -o font/regular.ttf
+          python zh/font.py source font collect
           python -m fontTools.subset font/regular.ttf --text-file=font/characters.txt --output-file=font/ReKHCoM-Zh.ttf
+          python zh/font.py source font embed
           curl -fL --retry 3 "$ASSET_URL" -o upstream-package.zip
+      - name: Reuse the published Windows ZIP for an Android hotfix
+        if: matrix.platform == 'windows' && env.ANDROID_HOTFIX == 'true'
+        run: |
+          mkdir dist
+          zip="dist/ReKHCoM-$UPSTREAM_TAG-zh-CN-Windows.zip"
+          curl -fL --retry 3 "$ASSET_URL" -o "$zip"
+          echo "$ASSET_SHA256  $zip" | sha256sum -c
       - name: Build Windows launcher and package
-        if: matrix.platform == 'windows'
+        if: matrix.platform == 'windows' && env.ANDROID_HOTFIX != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -117,6 +135,13 @@ jobs:
       - name: Verify Android safe-startup routing
         if: matrix.platform == 'android'
         run: python source/port/tools/test_android_safe_startup_launch.py
+      - name: Verify actual launcher glyph atlas at multiple DPIs
+        if: matrix.platform == 'android'
+        run: |
+          imgui=source/port/decompui/third_party/imgui
+          c++ -std=c++17 -O2 -Isource/port/decompui -I"$imgui" -Ifont zh/font_probe.cpp \
+            "$imgui/imgui.cpp" "$imgui/imgui_draw.cpp" "$imgui/imgui_tables.cpp" "$imgui/imgui_widgets.cpp" -o font-probe
+          ./font-probe
       - uses: android-actions/setup-android@v3
         if: matrix.platform == 'android'
         with:
@@ -132,7 +157,8 @@ jobs:
             cmake -S source/port/android -B "native-$abi" -G Ninja \
               -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
               -DANDROID_ABI="$abi" -DANDROID_PLATFORM=android-21 -DCMAKE_BUILD_TYPE=Release \
-              -DSDL_SOURCE_DIR="$sdl" -DFREETYPE_SOURCE_DIR="$PWD/deps/freetype" -DREGIONS=
+              -DSDL_SOURCE_DIR="$sdl" -DFREETYPE_SOURCE_DIR="$PWD/deps/freetype" -DREGIONS= \
+              -DREKHCOM_LAUNCHER_FONT_INCLUDE_DIR="$PWD/font"
             cmake --build "native-$abi" --target launcher
             "$ndk/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" --strip-unneeded "native-$abi/liblauncher.so"
           done
@@ -204,4 +230,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_TAG: ${{ needs.discover.outputs.tag }}
           TARGET_TAG: ${{ needs.discover.outputs.target }}
+          ANDROID_HOTFIX: ${{ needs.discover.outputs.hotfix }}
         run: python zh/releases.py publish

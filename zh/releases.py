@@ -35,24 +35,34 @@ def local_release(tag):
 
 def discover():
     requested = os.environ.get("REQUESTED_TAG", "")
+    hotfix = os.environ.get("REQUEST_ANDROID_HOTFIX", "") == "true"
     if requested and not re.fullmatch(r"v[0-9]+(?:\.[0-9]+){1,2}(?:-pre[1-9][0-9]?)?", requested):
         raise ValueError("Invalid upstream release tag")
+    if hotfix and not re.fullmatch(r"v[0-9]+(?:\.[0-9]+){1,2}", requested):
+        raise ValueError("An Android hotfix requires an explicit stable upstream release tag")
     choice = f"tags/{requested}" if requested else "latest"
     release = api(f"repos/{UPSTREAM}/releases/{choice}")
     tag = release["tag_name"]
     if release["draft"] or not re.fullmatch(r"v[0-9]+(?:\.[0-9]+){1,2}(?:-pre[1-9][0-9]?)?", tag):
         raise ValueError(f"Unsupported upstream release version: {tag}")
-    target = tag + "-zh"
+    base = tag + "-zh"
+    target = base + ".1" if hotfix else base
     existing = local_release(target)
     outputs = {"needed": "false"}
     if not existing or existing["draft"]:
-        outputs.update(needed="true", tag=tag, target=target)
+        outputs.update(needed="true", tag=tag, target=target, hotfix=str(hotfix).lower())
         for platform, suffix in SUFFIXES.items():
+            owner, asset_tag, asset_release = UPSTREAM, tag, release
+            if hotfix and platform == "windows":
+                owner, asset_tag, asset_release = FORK, base, local_release(base)
+                if not asset_release or asset_release["draft"]:
+                    raise ValueError("The initial localized release must exist before its Android hotfix")
+                suffix = "zh-CN-Windows.zip"
             name = f"ReKHCoM-{tag}-{suffix}"
-            asset = next((asset for asset in release["assets"] if asset["name"] == name), None)
+            asset = next((asset for asset in asset_release["assets"] if asset["name"] == name), None)
             if not asset or not re.fullmatch(r"sha256:[a-f0-9]{64}", asset.get("digest") or ""):
                 raise ValueError(f"Missing published asset or SHA-256: {name}")
-            expected_url = f"https://github.com/{UPSTREAM}/releases/download/{tag}/{name}"
+            expected_url = f"https://github.com/{owner}/releases/download/{asset_tag}/{name}"
             if asset["browser_download_url"] != expected_url:
                 raise ValueError(f"Unexpected download URL for {name}")
             outputs[f"{platform}_url"] = expected_url
@@ -87,6 +97,8 @@ def publish():
 
 [上游发行版]({release["html_url"]}) · [云构建](https://github.com/{FORK}/actions/runs/{os.environ["GITHUB_RUN_ID"]})
 """
+    if os.environ.get("ANDROID_HOTFIX") == "true":
+        notes = "安卓界面修复 .1。安全启动页与导入提示支持简体中文，图形启动器内置 Noto Sans SC 字库。Windows 附件沿用上一版。\n\n" + notes
     if not existing:
         with tempfile.TemporaryDirectory() as staging:
             notes_file = Path(staging) / "notes.md"
@@ -101,7 +113,10 @@ def publish():
         name: f"sha256:{value}" for name, value in hashes.items()
     }:
         raise ValueError("Staged release asset inventory or SHA-256 differs from the builds")
-    subprocess.run(("gh", "release", "edit", "--repo", FORK, f"--title={title}", "--draft=false", *mode, target),
+    latest = []
+    if os.environ.get("ANDROID_HOTFIX") == "true" and api(f"repos/{UPSTREAM}/releases/latest")["tag_name"] == tag:
+        latest = ["--latest"]
+    subprocess.run(("gh", "release", "edit", "--repo", FORK, f"--title={title}", "--draft=false", *mode, *latest, target),
                    check=True)
 
 
