@@ -56,7 +56,7 @@ index 4ea8db4..1ca74b5 100644
          objs.append("$builddir/port/core_assets_rc.o")
          n.newline()
 diff --git a/port/decompui/decompui.cpp b/port/decompui/decompui.cpp
-index f527261..59c77aa 100644
+index f527261..aa8d6ba 100644
 --- a/port/decompui/decompui.cpp
 +++ b/port/decompui/decompui.cpp
 @@ -122,7 +122,7 @@ static bool sSpanish;
@@ -68,7 +68,56 @@ index f527261..59c77aa 100644
  static std::unordered_map<std::string, const char*> sUiTable;   /* English text -> this language's */
  static std::unordered_map<const char*, const char*> sUiSeen;    /* the same by address, once looked up */
  
-@@ -640,11 +640,11 @@ static void SaveIni() {
+@@ -146,19 +146,26 @@ struct Version {
+     const char* id;
+     const char* code;
+     const char* sha1;
+-    const char* regionEs;
+     const char* regionEn;
+     const char* languages; /* flag:code pairs, e.g. "gb:EN fr:FR" */
+ };
+ 
+ static const Version kVersions[] = {
+-    { "eu", "B8CP", "8db73586cdb11b3795907edebf43228dbcd3e6b2", "Europa", "Europe", "gb:EN fr:FR de:DE es:ES it:IT" },
+-    { "us", "B8CE", "10729bd884f8fdca7a310b6d606c52e46657aa48", "América", "USA", "us:EN" },
+-    { "jp", "B8CJ", "59ec0a0a4ccd1e6acb3bbd7bfb21d63988958cfa", "Japón", "Japan", "jp:JA" },
++    { "eu", "B8CP", "8db73586cdb11b3795907edebf43228dbcd3e6b2", "Europe", "gb:EN fr:FR de:DE es:ES it:IT" },
++    { "us", "B8CE", "10729bd884f8fdca7a310b6d606c52e46657aa48", "USA", "us:EN" },
++    { "jp", "B8CJ", "59ec0a0a4ccd1e6acb3bbd7bfb21d63988958cfa", "Japan", "jp:JA" },
+ };
+ static const int kVersionCount = 3;
+ static const size_t kRomSize = 32u << 20;
+ 
++static const char* RegionName(int version) {
++    if (version == 0)
++        return T("Europa", "Europe");
++    if (version == 1)
++        return T("América", "USA");
++    return T("Japón", "Japan");
++}
++
+ struct VersionState {
+     bool installed;
+     fs::path exe;
+@@ -383,7 +390,7 @@ static void InstallRom(const fs::path& path) {
+         if (std::memcmp(rom.data() + 0xAC, kVersions[v].code, 4) != 0)
+             continue;
+         if (Sha1Hex(rom) != kVersions[v].sha1) {
+-            Notice(std::string(T("La ROM ", "The ")) + T(kVersions[v].regionEs, kVersions[v].regionEn) +
++            Notice(std::string(T("La ROM ", "The ")) + RegionName(v) +
+                        T(" no coincide con el volcado original (SHA-1 distinto).",
+                          " ROM does not match the original dump (different SHA-1)."),
+                    true);
+@@ -409,7 +416,7 @@ static void InstallRom(const fs::path& path) {
+         sState[v].installed = true;
+         KeepSelection();
+         Notice(std::string(T("ROM instalada y verificada: ", "ROM installed and verified: ")) +
+-                   T(kVersions[v].regionEs, kVersions[v].regionEn),
++                   RegionName(v),
+                false);
+         return;
+     }
+@@ -640,11 +647,11 @@ static void SaveIni() {
  static const char* const kGameLanguageIds[] = { "", "en", "fr", "de", "it", "es" };
  /* The launcher's languages: 1 Spanish, 2 English, then the European cartridge's other three and Japanese; 0 until
     chosen. ids[] as kh_com's and the flags' (LanguageFlag). */
@@ -84,7 +133,7 @@ index f527261..59c77aa 100644
  static int sUiLanguage;
  
  static void ApplyUiLanguage() {
-@@ -658,6 +658,7 @@ static void ApplyUiLanguage() {
+@@ -658,6 +665,7 @@ static void ApplyUiLanguage() {
              case LANG_GERMAN: system = "de"; break;
              case LANG_ITALIAN: system = "it"; break;
              case LANG_JAPANESE: system = "ja"; break;
@@ -92,7 +141,7 @@ index f527261..59c77aa 100644
          }
  #else
          int count = 0;
-@@ -1093,12 +1094,56 @@ static void LoadFonts() {
+@@ -1093,12 +1101,48 @@ static void LoadFonts() {
      if (sFontBody == nullptr) {
          ImFontConfig def;
          def.SizePixels = Px(16);
@@ -105,15 +154,14 @@ index f527261..59c77aa 100644
      if (sFontMenuSmall == nullptr)
          sFontMenuSmall = sFontSmall;
 +
-+    // The package ships a small, simplified-Chinese font subset on both launchers.
-+    // Keep its byte buffer alive alongside each font source until the atlas is cleared.
-+    const char* zhAsset = "assets/fonts/ReKHCoM-Zh.ttf";
++    // The package ships a font subset containing the launcher's Chinese glyphs.
 +#ifdef LAUNCHER_ANDROID
-+    size_t zhSize = 0;
-+    void* zhBytes = SDL_LoadFile(zhAsset, &zhSize);
++    const std::string zhPath = "fonts/ReKHCoM-Zh.ttf";
 +#else
-+    const std::string zhPath = (sRoot / zhAsset).string();
++    const std::string zhPath = (sRoot / "assets/fonts/ReKHCoM-Zh.ttf").u8string();
 +#endif
++    size_t zhSize = 0;
++    void* zhBytes = SDL_LoadFile(zhPath.c_str(), &zhSize);
 +    static ImVector<ImWchar> zhRanges;
 +    if (zhRanges.empty()) {
 +        ImFontGlyphRangesBuilder builder;
@@ -133,24 +181,17 @@ index f527261..59c77aa 100644
 +        merge.DstFont = font;
 +        merge.OversampleH = 1;
 +        const float size = font->Sources->SizePixels;
-+#ifdef LAUNCHER_ANDROID
 +        if (zhBytes && zhSize <= 0x7fffffff) {
 +            void* ownedBytes = IM_ALLOC(zhSize);
 +            std::memcpy(ownedBytes, zhBytes, zhSize);
 +            io.Fonts->AddFontFromMemoryTTF(ownedBytes, static_cast<int>(zhSize), size, &merge, zhRanges.Data);
 +        }
-+#else
-+        if (fs::exists(zhPath))
-+            io.Fonts->AddFontFromFileTTF(zhPath.c_str(), size, &merge, zhRanges.Data);
-+#endif
 +    }
-+#ifdef LAUNCHER_ANDROID
 +    SDL_free(zhBytes);
-+#endif
  }
  
  /* AddFont returns an unbuilt object: a later merge can make Build fail while
-@@ -1509,7 +1554,7 @@ static bool HeaderChip(const char* id, const char* label, const char* flag, ImVe
+@@ -1509,7 +1553,7 @@ static bool HeaderChip(const char* id, const char* label, const char* flag, ImVe
      return clicked;
  }
  
@@ -159,8 +200,27 @@ index f527261..59c77aa 100644
  static void LauncherLanguagePicker(ImVec2 size) {
      if (HeaderChip("##uilang", kUiLanguageNames[sUiLanguage], kUiLanguageFlags[sUiLanguage], size, true) ||
          (sPage == PAGE_HOME && SDL_getenv("DECOMPUI_LANG_LIST"))) /* harness: the list open on Home's shot */
+@@ -1639,7 +1683,7 @@ static void PageHome(SDL_Window* window) {
+         /* region, code and languages */
+         float tx = rowMin.x + Px(44);
+         dl->AddText(sFontMenu, sFontMenu->FontSize, ImVec2(tx, rowMin.y + Px(4)), ImGui::GetColorU32(kText),
+-                    T(ver.regionEs, ver.regionEn));
++                    RegionName(v));
+         {
+             /* the code, then each language with its flag */
+             float fs = sFontSmall->FontSize, y = rowMin.y + Px(28), x = tx;
+@@ -3402,7 +3446,8 @@ static fs::path PickInstallFolder() {
+     DWORD options = 0;
+     dialog->GetOptions(&options);
+     dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+-    dialog->SetTitle(sUiLanguage == 1 ? L"Carpeta donde instalar ReKHCoM" : L"Folder to install ReKHCoM in");
++    dialog->SetTitle(sUiLanguage == UI_LANGUAGE_ZH ? L"选择 ReKHCoM 安装文件夹" :
++                     sUiLanguage == 1 ? L"Carpeta donde instalar ReKHCoM" : L"Folder to install ReKHCoM in");
+     std::error_code ec;
+     for (wchar_t d = L'D'; d <= L'Z'; d++) {
+         std::wstring games = std::wstring(1, d) + L":\\Games";
 diff --git a/port/decompui/i18n/strings.json b/port/decompui/i18n/strings.json
-index a9610ef..52c8f4d 100644
+index a9610ef..e33ce70 100644
 --- a/port/decompui/i18n/strings.json
 +++ b/port/decompui/i18n/strings.json
 @@ -47,6 +47,10 @@
@@ -211,18 +271,24 @@ index a9610ef..52c8f4d 100644
   {
    "en": "Could not start the game.",
    "es": "No se pudo iniciar el juego."
-@@ -471,10 +483,6 @@
-   "en": "Every map card at 9",
-   "es": "Todas las cartas de mapa a 9"
+@@ -468,12 +480,12 @@
+   "es": "Mejoras"
   },
-- {
+  {
+-  "en": "Every map card at 9",
+-  "es": "Todas las cartas de mapa a 9"
++  "en": "Europe",
++  "es": "Europa"
+  },
+  {
 -  "en": "Exact pixels",
 -  "es": "Píxel exacto"
-- },
++  "en": "Every map card at 9",
++  "es": "Todas las cartas de mapa a 9"
+  },
   {
    "en": "Executable missing",
-   "es": "Falta el ejecutable"
-@@ -503,10 +511,6 @@
+@@ -503,10 +515,6 @@
    "en": "File",
    "es": "Archivo"
   },
@@ -233,7 +299,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "Fill window",
    "es": "Llenar ventana"
-@@ -603,10 +607,6 @@
+@@ -603,10 +611,6 @@
    "en": "GBA title brightness",
    "es": "Brillo del título GBA"
   },
@@ -244,7 +310,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "GBA: cubic interpolation and a gentle low-pass, less of the metallic edge in the 16-bit sound's treble. HD: the interpolation only, crisper beside the HD music.",
    "es": "GBA: interpolación cúbica y un paso bajo suave, menos aspereza metálica en los agudos del sonido de 16 bits. HD: solo la interpolación, más nítido junto a la música HD."
-@@ -751,6 +751,10 @@
+@@ -751,6 +755,10 @@
    "en": "Import GBA save... (experimental)",
    "es": "Importar partida de GBA... (experimental)"
   },
@@ -255,7 +321,18 @@ index a9610ef..52c8f4d 100644
   {
    "en": "Import stopped.",
    "es": "Carga detenida."
-@@ -1059,6 +1063,10 @@
+@@ -827,6 +835,10 @@
+   "en": "JP signal; audio unverified",
+   "es": "señal JP; audio sin verificar"
+  },
++ {
++  "en": "Japan",
++  "es": "Japón"
++ },
+  {
+   "en": "Just the basics: movies, music and HUD (~0.6 GB)",
+   "es": "Solo lo básico: películas, música y HUD (~0,6 GB)"
+@@ -1059,6 +1071,10 @@
    "en": "On",
    "es": "Sí"
   },
@@ -266,7 +343,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "On the phone the mod comes ready from the PC: copy to the phone the hd folder the PC launcher builds (in ReKHCoM's folder) and choose it here. The scenes take several GB: copy only what you want. A second copy only adds what is new.",
    "es": "En el teléfono el mod llega armado desde el PC: copia al teléfono la carpeta hd que arma el launcher de PC (en la carpeta de ReKHCoM) y elígela aquí. Las escenas ocupan varios GB: copia solo lo que quieras. Una segunda copia solo agrega lo nuevo."
-@@ -1143,6 +1151,10 @@
+@@ -1143,6 +1159,10 @@
    "en": "Pixel scale: x4 enlarges each pixel four times. Lower scales show more world and cost more CPU.",
    "es": "Escala de píxeles: x4 amplía cada píxel cuatro veces. Menos aumento muestra más mundo y exige más al PC."
   },
@@ -277,7 +354,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "Points: %u · Softcore: %u",
    "es": "Puntos: %u · Softcore: %u"
-@@ -1183,10 +1195,6 @@
+@@ -1183,10 +1203,6 @@
    "en": "Re:Chain of Memories' cards, HUD, music, movies and scenes, from your KINGDOM HEARTS HD 1.5+2.5.",
    "es": "Las cartas, el HUD, la música, los videos y las escenas de Re:Chain of Memories, de tu KINGDOM HEARTS HD 1.5+2.5."
   },
@@ -288,7 +365,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "Re:Chain of Memories' soundtrack in place of the GBA music.",
    "es": "La banda sonora orquestada de Re:Chain of Memories en lugar de la música de GBA."
-@@ -1239,14 +1247,26 @@
+@@ -1239,14 +1255,26 @@
    "en": "Removed from Steam. If Steam is open, restart it to see it gone from the library.",
    "es": "Quitado de Steam. Si Steam está abierto, reinícialo para que desaparezca de la biblioteca."
   },
@@ -315,7 +392,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "Requires the verified original Japanese ROM in roms/B8CJ.gba. Applied when starting the game; keeps European or English text.",
    "es": "Requiere la ROM japonesa original verificada en roms/B8CJ.gba. Se aplica al iniciar el juego; conserva los textos europeos o ingleses."
-@@ -1263,6 +1283,10 @@
+@@ -1263,6 +1291,10 @@
    "en": "Resume",
    "es": "Retomar"
   },
@@ -326,7 +403,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "Resuming keeps what is loaded and goes on from there next time. Removing takes away only what this import copied: what you had before and your saves stay.",
    "es": "Retomar conserva lo ya cargado y sigue desde ahí al abrir de nuevo. Borrar quita solo lo que copió esta carga: lo que ya tenías y tus partidas quedan."
-@@ -1499,6 +1523,10 @@
+@@ -1499,6 +1531,10 @@
    "en": "The ",
    "es": "La ROM "
   },
@@ -337,7 +414,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "The HD mod is loading. Closing now is not ideal: it is best to wait until it finishes.",
    "es": "El mod HD se está cargando. Cerrar ahora no es lo ideal: lo mejor es esperar a que termine."
-@@ -1603,6 +1631,10 @@
+@@ -1603,10 +1639,18 @@
    "en": "Turn this on if HD videos show green stripes. It takes effect the next time you start the game.",
    "es": "Actívala si aparecen franjas verdes en los videos HD. Se aplica al volver a iniciar el juego."
   },
@@ -348,7 +425,15 @@ index a9610ef..52c8f4d 100644
   {
    "en": "UDP port",
    "es": "Puerto UDP"
-@@ -1743,6 +1775,14 @@
+  },
++ {
++  "en": "USA",
++  "es": "América"
++ },
+  {
+   "en": "Undub (Japanese voices)",
+   "es": "Undub (voces japonesas)"
+@@ -1743,6 +1787,14 @@
    "en": "checked",
    "es": "comprobado"
   },
@@ -363,7 +448,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "files detected; no voice language implied",
    "es": "archivos detectados; no indica el idioma de las voces"
-@@ -1751,6 +1791,14 @@
+@@ -1751,6 +1803,14 @@
    "en": "graphics",
    "es": "gráficos"
   },
@@ -378,7 +463,7 @@ index a9610ef..52c8f4d 100644
   {
    "en": "movies",
    "es": "videos"
-@@ -1775,10 +1823,18 @@
+@@ -1775,10 +1835,18 @@
    "en": "steam_api.dll is missing next to the game.",
    "es": "Falta steam_api.dll junto al juego."
   },
@@ -399,12 +484,15 @@ index a9610ef..52c8f4d 100644
    "es": "idioma desconocido"
 diff --git a/port/decompui/i18n/zh.json b/port/decompui/i18n/zh.json
 new file mode 100644
-index 0000000..5a5706d
+index 0000000..f680da0
 --- /dev/null
 +++ b/port/decompui/i18n/zh.json
-@@ -0,0 +1,462 @@
+@@ -0,0 +1,465 @@
 +{
 + "": "ROM ",
++ "Europe": "欧洲版",
++ "Japan": "日本版",
++ "USA": "美国版",
 + ". Recoverable progress is preserved.": "。已保留可恢复的进度。",
 + "64-BIT MODE · SOMETHING WENT WRONG": "64 位模式 · 运行异常",
 + "64-bit mode requires a CPU with SSE4.1. You can choose 32 bits under Advanced.": "64 位模式需要支持 SSE4.1 的处理器。你可以在高级设置中选择 32 位模式。",
@@ -866,10 +954,10 @@ index 0000000..5a5706d
 + "unknown language": "未知语言"
 +}
 diff --git a/port/decompui/i18n_table.inc b/port/decompui/i18n_table.inc
-index d9d3030..9df5c8b 100644
+index d9d3030..4408f6d 100644
 --- a/port/decompui/i18n_table.inc
 +++ b/port/decompui/i18n_table.inc
-@@ -1,405 +1,463 @@
+@@ -1,405 +1,466 @@
  /* Generated by port/tools/launcher_strings.py --emit from the JSON files in port/decompui/i18n: do not edit. */
 -static const char* const kI18n[][5] = {
 -    { "", nullptr, nullptr, nullptr, nullptr },
@@ -1395,6 +1483,7 @@ index d9d3030..9df5c8b 100644
 +    { "Earned on your account", "Obtenu sur ton compte", "Auf deinem Konto erspielt", "Ottenuto sul tuo account", "アカウントで獲得済み", "你的账号已获得" },
 +    { "Effects volume", "Volume des effets", "Effektlautstärke", "Volume effetti", "効果音の音量", "音效音量" },
 +    { "Enhancements", "Améliorations", "Verbesserungen", "Migliorie", "強化機能", "增强功能" },
++    { "Europe", nullptr, nullptr, nullptr, nullptr, "欧洲版" },
 +    { "Every map card at 9", "Toutes les cartes de map à 9", "Alle Mapkarten auf 9", "Ogni carta mappa a 9", "マップカードをすべて9枚にする", "所有地图卡各 9 张" },
 +    { "Executable missing", "Fichier exécutable introuvable", "Programmdatei fehlt", "Eseguibile mancante", "実行ファイルがありません", "缺少可执行文件" },
 +    { "Exp", "Exp", "EP", "Exp", "EXP", "经验值" },
@@ -1483,6 +1572,7 @@ index d9d3030..9df5c8b 100644
 +    { "It takes a few minutes and the launcher stays usable; everything stays in Enhancements.", "Cela prend quelques minutes et le launcher reste utilisable ; tout reste dans Améliorations.", "Es dauert ein paar Minuten, der Launcher bleibt benutzbar; alles bleibt unter Verbesserungen.", "Richiede qualche minuto e il launcher resta utilizzabile; tutto resta in Migliorie.", "数分かかりますが、ランチャーはそのまま使えます。すべて強化機能で設定できます。", "处理需要几分钟，期间可继续使用启动器。完成后可在增强功能中查看。" },
 +    { "It was not in Steam's game list; nothing was changed.", "Il n'était pas dans la liste des jeux Steam ; rien n'a été modifié.", "Es war nicht in der Spieleliste von Steam; nichts wurde geändert.", "Non era nell'elenco giochi di Steam; non è cambiato nulla.", "Steamのゲームリストにありませんでした。何も変更していません。", "Steam 库中没有该游戏，未进行更改。" },
 +    { "JP signal; audio unverified", nullptr, nullptr, nullptr, nullptr, "检测到日语标记，音轨待核实" },
++    { "Japan", nullptr, nullptr, nullptr, nullptr, "日本版" },
 +    { "Just the basics: movies, music and HUD (~0.6 GB)", "L'essentiel : films, musique et ATH (~0,6 Go)", "Nur das Wichtigste: Filme, Musik und HUD (ca. 0,6 GB)", "Solo l'essenziale: film, musica e HUD (~0,6 GB)", "基本のみ:ムービー、音楽、HUD(約0.6 GB)", "基础内容：影片、音乐与 HUD（约 0.6 GB）" },
 +    { "Just the basics: movies, music and HUD, ~0.6 GB", "L'essentiel : films, musique et ATH, ~0,6 Go", "Nur das Wichtigste: Filme, Musik und HUD, ca. 0,6 GB", "Solo l'essenziale: film, musica e HUD, ~0,6 GB", "基本のみ:ムービー、音楽、HUD、約0.6 GB", "基础内容：影片、音乐与 HUD，约 0.6 GB" },
 +    { "KHMenu is the game's; System is the computer's own. Subtitles always keep theirs.", "KHMenu est celle du jeu ; Système, celle de l'ordinateur. Les sous-titres gardent toujours la leur.", "KHMenu ist die des Spiels, System die des Computers. Untertitel behalten immer ihre eigene.", "KHMenu è quello del gioco; Sistema, quello del computer. I sottotitoli mantengono sempre il loro.", "KHMenuはゲームのフォント、システムはPCのフォントです。字幕は常に専用のフォントのままです。", "KHMenu 为游戏字体，系统字体由设备提供。字幕始终保留原字体。" },
@@ -1685,6 +1775,7 @@ index d9d3030..9df5c8b 100644
 +    { "Turn this on if HD videos show green stripes. It takes effect the next time you start the game.", "Activez cette option si des bandes vertes apparaissent dans les vidéos HD. Elle s’applique au prochain démarrage du jeu.", "Aktiviere diese Option bei grünen Streifen in HD-Videos. Sie gilt ab dem nächsten Spielstart.", "Attiva questa opzione se nei video HD compaiono strisce verdi. Si applica al prossimo avvio del gioco.", "HDムービーに緑色の縞が出る場合はオンにしてください。次回のゲーム起動時に適用されます。", "高清影片出现绿色条纹时可开启。下次启动游戏时生效。" },
 +    { "Two short movies retain the GBA version until JP timing is verified; full scenes use your JP import.", nullptr, nullptr, nullptr, nullptr, "在日语版时间轴校验完成前，两部短片仍使用 GBA 版。其余完整过场使用你导入的日语版。" },
 +    { "UDP port", "Port UDP", "UDP-Port", "Porta UDP", "UDPポート", "UDP 端口" },
++    { "USA", nullptr, nullptr, nullptr, nullptr, "美国版" },
 +    { "Undub (Japanese voices)", "Undub (voix japonaises)", "Undub (japanische Stimmen)", "Undub (voci giapponesi)", "吹き替えなし(日本語音声)", "日语配音" },
 +    { "Unlabelled (legacy Auto)", nullptr, nullptr, nullptr, nullptr, "无标签（旧版自动）" },
 +    { "Unlocked", "Obtenu", "Freigeschaltet", "Sbloccato", "解除済み", "已解锁" },
@@ -1736,6 +1827,32 @@ index d9d3030..9df5c8b 100644
 +    { "unexpected worker error", nullptr, nullptr, nullptr, nullptr, "后台任务发生意外错误" },
 +    { "unknown language", nullptr, nullptr, nullptr, nullptr, "未知语言" },
  };
+diff --git a/port/decompui/rom_folder.inc b/port/decompui/rom_folder.inc
+index eca25c9..235ff6c 100644
+--- a/port/decompui/rom_folder.inc
++++ b/port/decompui/rom_folder.inc
+@@ -330,7 +330,7 @@ static void RomFolderPoll(SDL_Window* window) {
+         if (r.roms || r.hdFiles || r.recycled) {
+             std::string text = T("En la carpeta roms: ", "In the roms folder: ");
+             for (size_t i = 0; i < r.versions.size(); i++)
+-                text += std::string(i ? ", " : "") + T("ROM ", "") + T(kVersions[r.versions[i]].regionEs, kVersions[r.versions[i]].regionEn) +
++                text += std::string(i ? ", " : "") + T("ROM ", "") + RegionName(r.versions[i]) +
+                         T(" instalada", " ROM installed");
+             char extra[200];
+             if (r.hdFiles) {
+diff --git a/port/decompui/save_editor_page.inc b/port/decompui/save_editor_page.inc
+index 9296f11..edc72fa 100644
+--- a/port/decompui/save_editor_page.inc
++++ b/port/decompui/save_editor_page.inc
+@@ -210,7 +210,7 @@ static void PageEditor(SDL_Window* window) {
+     /* which save: version, bank (the game's own setting) and file */
+     const char* versions[kVersionCount];
+     for (int v = 0; v < kVersionCount; v++)
+-        versions[v] = T(kVersions[v].regionEs, kVersions[v].regionEn);
++        versions[v] = RegionName(v);
+     CycleRow(T("Versión", "Version"), nullptr, sEdVersion, kVersionCount, versions);
+     const char* const* files = sSpanish ? kFileNamesEs : kFileNamesEn;
+     CycleRow(T("Archivo", "File"), nullptr, sEdFile, 4, files);
 diff --git a/port/tools/launcher_strings.py b/port/tools/launcher_strings.py
 index 4e4298e..6dd7261 100644
 --- a/port/tools/launcher_strings.py
