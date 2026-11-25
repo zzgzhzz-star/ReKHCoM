@@ -114,6 +114,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Verify Android safe-startup routing
+        if: matrix.platform == 'android'
+        run: python source/port/tools/test_android_safe_startup_launch.py
       - uses: android-actions/setup-android@v3
         if: matrix.platform == 'android'
         with:
